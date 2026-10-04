@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'core/theme/app_theme.dart';
 import 'services/app_services.dart';
 import 'state/device_state.dart';
+import 'state/hardware_state.dart';
 import 'state/record_state.dart';
 import 'state/sync_state.dart';
 import 'ui/screens/welcome_screen.dart';
@@ -25,6 +26,7 @@ class SpoonfullApp extends StatelessWidget {
         ),
         ChangeNotifierProvider(create: (_) => SyncState(services)),
         ChangeNotifierProvider(create: (_) => RecordState(services)..loadAll()),
+        ChangeNotifierProvider(create: (_) => HardwareState(services)),
       ],
       child: MaterialApp(
         title: 'Spoonfull',

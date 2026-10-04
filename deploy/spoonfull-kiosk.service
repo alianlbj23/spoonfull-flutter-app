@@ -1,0 +1,22 @@
+[Unit]
+Description=Spoonfull meal cart kiosk (Flutter app, fullscreen)
+After=graphical.target network-online.target
+Wants=network-online.target
+
+[Service]
+User=__USER__
+# 讓 App 看到桌面 session (X11 或 Wayland)。Pi OS / Ubuntu Desktop 的自動登入 session 會建立這些。
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=WAYLAND_DISPLAY=wayland-0
+# 全螢幕、無標題列、隱藏游標 (linux/runner/my_application.cc)
+Environment=SPOONFULL_KIOSK=1
+# 沒有 keyring 時 flutter_secure_storage 會失敗,App 會自動退回檔案儲存 (lib/data/local/secure_token_storage.dart)
+WorkingDirectory=/opt/spoonfull
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -S "/tmp/.X11-unix/X0" ] && exit 0; sleep 1; done; exit 0'
+ExecStart=/opt/spoonfull/spoonfull_flutter_app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

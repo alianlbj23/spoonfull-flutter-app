@@ -61,7 +61,7 @@ void main() {
   });
 
   tearDown(() async {
-    await env.services.dispose();
+    await env.dispose();
     await tmp.delete(recursive: true);
   });
 

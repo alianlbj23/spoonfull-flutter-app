@@ -6,6 +6,7 @@ import '../data/local/secure_token_storage.dart';
 import '../data/models/auth_token.dart';
 import '../data/models/bed_data.dart';
 import '../data/models/device_config.dart';
+import '../data/models/hardware_config.dart';
 import '../data/models/local_meal_record.dart';
 import '../data/models/meal_data.dart';
 import '../data/models/offline_queue_item.dart';
@@ -34,6 +35,10 @@ class LocalStorageService {
   ServerSettings get serverSettings => _prefs.readServerSettings();
   Future<void> saveServerSettings(ServerSettings s) =>
       _prefs.writeServerSettings(s);
+
+  HardwareConfig get hardwareConfig => _prefs.readHardwareConfig();
+  Future<void> saveHardwareConfig(HardwareConfig c) =>
+      _prefs.writeHardwareConfig(c);
 
   int? lastUpdated(String dataset) => _prefs.lastUpdated(dataset);
   Future<void> setLastUpdated(String dataset, int ts) =>

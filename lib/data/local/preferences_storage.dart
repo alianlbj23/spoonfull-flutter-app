@@ -1,9 +1,12 @@
+import 'dart:convert';
+
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/device_config.dart';
+import '../models/hardware_config.dart';
 
-/// 設備配置與同步時間戳 (規格 3.1.1),保存於 SharedPreferences。
+/// 設備配置、同步時間戳與硬體設定,保存於 SharedPreferences。
 class PreferencesStorage {
   PreferencesStorage(this._prefs);
 
@@ -18,6 +21,7 @@ class PreferencesStorage {
   static const _serverHost = 'server.host';
   static const _serverPort = 'server.port';
   static const _syncPrefix = 'sync.last_updated.';
+  static const _hardware = 'hardware.config';
 
   static Future<PreferencesStorage> create() async =>
       PreferencesStorage(await SharedPreferences.getInstance());
@@ -58,6 +62,22 @@ class PreferencesStorage {
     await _prefs.setString(_serverPort, s.port.trim());
     await _prefs.setString(_location, s.placeId.trim());
   }
+
+  /// 硬體設定 (相機 / 秤 / 參考照),以 JSON 保存。
+  HardwareConfig readHardwareConfig() {
+    final raw = _prefs.getString(_hardware);
+    if (raw == null) return const HardwareConfig();
+    try {
+      return HardwareConfig.fromJson(
+        (jsonDecode(raw) as Map).cast<String, Object?>(),
+      );
+    } catch (_) {
+      return const HardwareConfig();
+    }
+  }
+
+  Future<void> writeHardwareConfig(HardwareConfig c) =>
+      _prefs.setString(_hardware, jsonEncode(c.toJson()));
 
   /// 各資料集最後同步時間 (rooms / beds / meals),用於增量同步與快取有效期。
   int? lastUpdated(String dataset) => _prefs.getInt('$_syncPrefix$dataset');

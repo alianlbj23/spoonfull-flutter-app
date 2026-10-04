@@ -10,9 +10,10 @@ class AppDatabase {
 
   final Database db;
 
-  static const int _version = 1;
+  /// v2:meal_records 新增 weight_g / weight_source / edge_result (ARCHITECTURE.md §6.4)。
+  static const int _version = 2;
 
-  /// Jetson Nano (Linux) 與其他桌面平台透過 FFI 使用 SQLite。
+  /// Jetson / Raspberry Pi (Linux) 與其他桌面平台透過 FFI 使用 SQLite。
   static bool _factoryReady = false;
 
   static void initFactory() {
@@ -32,6 +33,7 @@ class AppDatabase {
       dbPath,
       version: _version,
       onCreate: (db, _) => _create(db),
+      onUpgrade: _upgrade,
     );
     return AppDatabase._(db);
   }
@@ -44,9 +46,20 @@ class AppDatabase {
       options: OpenDatabaseOptions(
         version: _version,
         onCreate: (db, _) => _create(db),
+        onUpgrade: _upgrade,
       ),
     );
     return AppDatabase._(db);
+  }
+
+  static Future<void> _upgrade(Database db, int from, int to) async {
+    if (from < 2) {
+      await db.execute('ALTER TABLE meal_records ADD COLUMN weight_g REAL');
+      await db.execute(
+        "ALTER TABLE meal_records ADD COLUMN weight_source TEXT NOT NULL DEFAULT 'none'",
+      );
+      await db.execute('ALTER TABLE meal_records ADD COLUMN edge_result TEXT');
+    }
   }
 
   static Future<void> _create(Database db) async {
@@ -104,6 +117,9 @@ class AppDatabase {
           before_after TEXT NOT NULL,
           image_path TEXT NOT NULL,
           capture_time INTEGER NOT NULL,
+          weight_g REAL,
+          weight_source TEXT NOT NULL DEFAULT 'none',
+          edge_result TEXT,
           ai_status TEXT NOT NULL,
           ai_result TEXT,
           sync_status TEXT NOT NULL,

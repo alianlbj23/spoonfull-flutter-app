@@ -8,6 +8,7 @@ import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/time_utils.dart';
 import '../../data/models/local_meal_record.dart';
+import '../../data/models/weight_reading.dart';
 import '../../state/record_state.dart';
 import '../widgets/buttons.dart';
 
@@ -70,6 +71,12 @@ class RecordDetailDialog extends StatelessWidget {
                     _kv('拍攝時間', time),
                     _kv('同步狀態', syncLabel, color: syncColor),
                     if (record.recordId != null) _kv('紀錄編號', record.recordId!),
+                    if (record.weightG != null)
+                      _kv(
+                        '整盤重量',
+                        '${record.weightG!.toStringAsFixed(0)} g'
+                        '${record.weightSource == WeightSource.manual ? ' (手動)' : ''}',
+                      ),
                     if (record.errorMessage != null)
                       _kv('錯誤', record.errorMessage!, color: AppColors.error),
                     const Divider(height: 24),

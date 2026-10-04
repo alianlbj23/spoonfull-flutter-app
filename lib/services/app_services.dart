@@ -8,6 +8,7 @@ import '../data/local/secure_token_storage.dart';
 import 'connectivity_service.dart';
 import 'device_pairing_service.dart';
 import 'error_handling_service.dart';
+import 'hardware/hardware_service.dart';
 import 'local_storage_service.dart';
 import 'offline_queue_service.dart';
 import 'record_service.dart';
@@ -22,6 +23,7 @@ class AppServices {
     required this.connectivity,
     required this.pairing,
     required this.queue,
+    required this.hardware,
     required this.records,
     required this.sync,
     required this.database,
@@ -33,6 +35,7 @@ class AppServices {
   final ConnectivityService connectivity;
   final DevicePairingService pairing;
   final OfflineQueueService queue;
+  final HardwareService hardware;
   final RecordService records;
   final SyncService sync;
   final AppDatabase database;
@@ -43,11 +46,13 @@ class AppServices {
     TokenStorage? tokens,
     ApiRepository? api,
     ConnectivityService? connectivity,
+    HardwareService Function(LocalStorageService storage)? hardwareBuilder,
   }) async {
     final db = database ?? await AppDatabase.open();
     final storage = LocalStorageService(
       prefs: prefs ?? await PreferencesStorage.create(),
-      tokens: tokens ?? SecureTokenStorage(),
+      // Linux kiosk 沒有 keyring 時自動退回檔案儲存 (ARCHITECTURE.md §5.1)。
+      tokens: tokens ?? FallbackTokenStorage(),
       database: db,
     );
     final errors = ErrorHandlingService();
@@ -71,12 +76,15 @@ class AppServices {
 
     final conn = connectivity ?? PlusConnectivityService();
     final queue = OfflineQueueService(storage);
+    final hardware =
+        hardwareBuilder?.call(storage) ?? HardwareService(storage: storage);
     final records = RecordService(
       api: repo,
       storage: storage,
       queue: queue,
       connectivity: conn,
       errors: errors,
+      hardware: hardware,
     );
     final sync = SyncService(
       api: repo,
@@ -94,6 +102,7 @@ class AppServices {
       connectivity: conn,
       pairing: pairing,
       queue: queue,
+      hardware: hardware,
       records: records,
       sync: sync,
       database: db,
@@ -102,6 +111,7 @@ class AppServices {
 
   Future<void> dispose() async {
     await sync.dispose();
+    await hardware.dispose();
     errors.dispose();
     await database.close();
   }

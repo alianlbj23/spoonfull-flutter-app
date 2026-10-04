@@ -46,3 +46,7 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# 測試圖片 (只保留 README)
+/test_images/*
+!/test_images/README.md

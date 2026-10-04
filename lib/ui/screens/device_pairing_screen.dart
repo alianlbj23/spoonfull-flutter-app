@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../config/app_config.dart';
 import '../../config/app_constants.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_theme.dart';
@@ -18,7 +19,8 @@ class DevicePairingScreen extends StatefulWidget {
 }
 
 class _DevicePairingScreenState extends State<DevicePairingScreen> {
-  String _code = '';
+  /// 有固定配對碼時預先填入,按確認即可。
+  String _code = AppConfig.autoPairingCode;
   bool _error = false;
 
   Future<void> _editCode() async {

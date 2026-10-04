@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../../config/app_config.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/time_utils.dart';
@@ -12,6 +13,7 @@ import '../widgets/buttons.dart';
 import '../widgets/numeric_keypad.dart';
 import '../widgets/pill_field.dart';
 import 'device_pairing_screen.dart';
+import 'hardware_settings_screen.dart';
 
 /// 設定畫面:伺服器位址 / 埠 / 場域 (Figma 設定頁)。
 ///
@@ -89,6 +91,21 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
     setState(() => _saving = false);
 
     if (!device.isPaired) {
+      // 有固定配對碼 (--dart-define=PAIRING_CODE) → 直接自動配對,不跳鍵盤。
+      if (AppConfig.hasAutoPairingCode) {
+        setState(() => _saving = true);
+        final ok = await device.autoPair();
+        if (!mounted) return;
+        setState(() => _saving = false);
+        if (ok) {
+          messenger.showSnackBar(const SnackBar(content: Text('已自動配對')));
+          if (!widget.embedded) navigator.maybePop();
+          return;
+        }
+        messenger.showSnackBar(
+          SnackBar(content: Text('自動配對失敗:${device.pairingError ?? ''}')),
+        );
+      }
       // 嵌在主畫面時,解除配對會由 MainShell 帶回歡迎畫面。
       if (widget.embedded) return;
       // 尚未配對 → 進入配對碼輸入畫面
@@ -185,6 +202,22 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
               label: '儲存設定',
               loading: _saving,
               onPressed: _save,
+            ),
+          ),
+          Positioned(
+            left: left + 165 + 322 + 24,
+            top: 485,
+            child: PrimaryButton(
+              key: const Key('hardware-settings'),
+              label: '硬體設定',
+              width: 220,
+              fontSize: 36,
+              background: AppColors.periwinkle,
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const HardwareSettingsScreen(),
+                ),
+              ),
             ),
           ),
         ],

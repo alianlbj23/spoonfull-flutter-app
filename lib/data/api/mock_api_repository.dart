@@ -122,13 +122,20 @@ class MockApiRepository implements ApiRepository {
     );
   }
 
+  /// 以 client_record_id 去重 (ARCHITECTURE.md §6.4):重送同一筆回原本的 record_id。
+  final Map<String, String> _recordIds = {};
+
   @override
   Future<MealRecordResult> uploadMealRecord(MealRecordUpload upload) async {
     await _delay();
     final after = upload.beforeAfter == 'after';
     final leftover = after ? _random.nextInt(60).toDouble() : 100.0;
+    final recordId = _recordIds.putIfAbsent(
+      upload.clientRecordId,
+      () => 'SRV-${DateTime.now().microsecondsSinceEpoch}',
+    );
     return MealRecordResult(
-      recordId: 'SRV-${DateTime.now().microsecondsSinceEpoch}',
+      recordId: recordId,
       captureTime: upload.captureTime,
       aiStatus: 'completed',
       aiResult: AiResult(

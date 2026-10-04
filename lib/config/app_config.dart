@@ -16,6 +16,14 @@ class AppConfig {
 
   static const bool useMockApi = bool.fromEnvironment('USE_MOCK_API');
 
+  /// 開發 / 測試用固定配對碼 (`--dart-define=PAIRING_CODE=123456`)。
+  ///
+  /// 有設定時,儲存伺服器設定後與每次啟動若尚未配對,App 會自動用這組碼配對,
+  /// 不用在機台上輸入;server 端需在測試環境接受同一組碼。正式部署不要設定。
+  static const String autoPairingCode = String.fromEnvironment('PAIRING_CODE');
+
+  static bool get hasAutoPairingCode => autoPairingCode.isNotEmpty;
+
   static AppEnvironment get environment => switch (_envName) {
     'prod' => AppEnvironment.prod,
     'test' => AppEnvironment.test,

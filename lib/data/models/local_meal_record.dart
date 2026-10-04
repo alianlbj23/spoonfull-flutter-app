@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import 'ai_result.dart';
+import 'image_quality.dart';
+import 'weight_reading.dart';
 
 enum MealPhase {
   before('餐前'),
@@ -32,7 +34,7 @@ enum SyncStatus {
       SyncStatus.values.firstWhere((s) => s.name == v, orElse: () => pending);
 }
 
-/// 本機食物紀錄 (規格 3.1.5)。
+/// 本機食物紀錄 (規格 3.1.5)。`localId` 同時是上傳的 `client_record_id`。
 class LocalMealRecord {
   const LocalMealRecord({
     required this.localId,
@@ -44,6 +46,9 @@ class LocalMealRecord {
     required this.beforeAfter,
     required this.imagePath,
     required this.captureTime,
+    this.weightG,
+    this.weightSource = WeightSource.none,
+    this.quality,
     this.aiStatus = AiStatus.pending,
     this.aiResult,
     this.syncStatus = SyncStatus.pending,
@@ -64,6 +69,13 @@ class LocalMealRecord {
   final MealPhase beforeAfter;
   final String imagePath;
   final int captureTime;
+
+  /// 整盤重量 (公克),餐前餐後各一次;沒有秤時為 null。
+  final double? weightG;
+  final WeightSource weightSource;
+
+  /// 拍照品質檢查結果,隨上傳放在 `edge_result`。
+  final ImageQualityReport? quality;
   final AiStatus aiStatus;
   final AiResult? aiResult;
   final SyncStatus syncStatus;
@@ -76,6 +88,9 @@ class LocalMealRecord {
 
   LocalMealRecord copyWith({
     String? recordId,
+    double? weightG,
+    WeightSource? weightSource,
+    bool clearWeight = false,
     AiStatus? aiStatus,
     AiResult? aiResult,
     SyncStatus? syncStatus,
@@ -94,6 +109,11 @@ class LocalMealRecord {
       beforeAfter: beforeAfter,
       imagePath: imagePath,
       captureTime: captureTime,
+      weightG: clearWeight ? null : (weightG ?? this.weightG),
+      weightSource: clearWeight
+          ? WeightSource.none
+          : (weightSource ?? this.weightSource),
+      quality: quality,
       aiStatus: aiStatus ?? this.aiStatus,
       aiResult: aiResult ?? this.aiResult,
       syncStatus: syncStatus ?? this.syncStatus,
@@ -106,6 +126,7 @@ class LocalMealRecord {
 
   factory LocalMealRecord.fromDb(Map<String, Object?> row) {
     final ai = row['ai_result'] as String?;
+    final edge = row['edge_result'] as String?;
     return LocalMealRecord(
       localId: row['local_id'] as String,
       recordId: row['record_id'] as String?,
@@ -116,6 +137,13 @@ class LocalMealRecord {
       beforeAfter: MealPhase.parse(row['before_after'] as String?),
       imagePath: row['image_path'] as String,
       captureTime: row['capture_time'] as int,
+      weightG: (row['weight_g'] as num?)?.toDouble(),
+      weightSource: WeightSource.parse(row['weight_source'] as String?),
+      quality: edge == null
+          ? null
+          : ImageQualityReport.fromJson(
+              jsonDecode(edge) as Map<String, Object?>,
+            ),
       aiStatus: AiStatus.parse(row['ai_status'] as String?),
       aiResult: ai == null
           ? null
@@ -138,6 +166,9 @@ class LocalMealRecord {
     'before_after': beforeAfter.name,
     'image_path': imagePath,
     'capture_time': captureTime,
+    'weight_g': weightG,
+    'weight_source': weightSource.name,
+    'edge_result': quality == null ? null : jsonEncode(quality!.toJson()),
     'ai_status': aiStatus.name,
     'ai_result': aiResult == null ? null : jsonEncode(aiResult!.toJson()),
     'sync_status': syncStatus.name,

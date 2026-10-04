@@ -52,7 +52,7 @@ void main() {
     final res = await repo.fetchRooms(placeId: 'A', lastUpdated: 50);
 
     expect(captured.headers['Authorization'], 'Bearer tok-123');
-    expect(captured.url.path, '/work/api/room_data.php');
+    expect(captured.url.path, '/api/machine/rooms/');
     expect(captured.url.queryParameters, {'place_id': 'A', 'last_updated': '50'});
     expect(res.rooms.single.roomName, '101');
     expect(res.timestamp, 200);

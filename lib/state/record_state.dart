@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../data/models/bed_data.dart';
+import '../data/models/image_quality.dart';
 import '../data/models/local_meal_record.dart';
 import '../data/models/meal_data.dart';
 import '../data/models/room_data.dart';
+import '../data/models/weight_reading.dart';
 import '../services/app_services.dart';
+import '../services/hardware/hardware_service.dart';
 import '../services/record_service.dart';
 
 /// 病房/床位/膳食資料與紀錄上傳狀態。
@@ -29,8 +32,16 @@ class RecordState extends ChangeNotifier {
   List<TimeSlot> timeSlots = const [];
   bool loading = false;
   bool uploading = false;
+  bool capturing = false;
 
   String get _placeId => _services.storage.serverSettings.placeId;
+
+  /// 是否有設定秤 (確認畫面決定要不要顯示重量面板)。
+  bool get scaleEnabled => _services.hardware.scale.enabled;
+
+  /// 品質檢查是否會提示重拍。
+  bool get qualityCheckEnabled =>
+      _services.hardware.config.qualityCheckEnabled;
 
   List<BedData> bedsFor(String roomId) => _beds[roomId] ?? const [];
 
@@ -85,7 +96,19 @@ class RecordState extends ChangeNotifier {
     );
   }
 
-  Future<String?> captureImage() => _services.records.captureImage();
+  /// 拍照 + 秤重 (ARCHITECTURE.md §5.1)。使用者取消時回傳 null。
+  Future<CaptureResult?> capture() async {
+    capturing = true;
+    notifyListeners();
+    try {
+      return await _services.records.capture();
+    } finally {
+      capturing = false;
+      notifyListeners();
+    }
+  }
+
+  Future<WeightReading?> readWeight() => _services.records.readWeight();
 
   Future<void> discardImage(String path) =>
       _services.records.discardImage(path);
@@ -96,6 +119,9 @@ class RecordState extends ChangeNotifier {
     required TimeSlot slot,
     required MealPhase phase,
     required String imagePath,
+    double? weightG,
+    WeightSource weightSource = WeightSource.none,
+    ImageQualityReport? quality,
   }) async {
     uploading = true;
     notifyListeners();
@@ -109,6 +135,9 @@ class RecordState extends ChangeNotifier {
         phase: phase,
         imagePath: imagePath,
         deviceId: _services.storage.deviceConfig.deviceId,
+        weightG: weightG,
+        weightSource: weightSource,
+        quality: quality,
       );
       if (outcome.status == UploadOutcomeStatus.queued) {
         await _services.sync.processQueue();

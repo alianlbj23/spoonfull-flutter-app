@@ -1,0 +1,8 @@
+# Spoonfull 機台硬體權限 (ARCHITECTURE.md §5.1)
+# USB HID 秤 (USB HID POS Scale,usage page 0x8D):讓 App 可以直接讀 /dev/hidrawN
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+# 序列埠秤 / HX711 微控制器 (USB serial)
+KERNEL=="ttyUSB*", MODE="0660", GROUP="dialout"
+KERNEL=="ttyACM*", MODE="0660", GROUP="dialout"
+# USB 相機
+KERNEL=="video*", SUBSYSTEM=="video4linux", MODE="0660", GROUP="video"

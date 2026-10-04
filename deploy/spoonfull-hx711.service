@@ -1,0 +1,12 @@
+[Unit]
+Description=Spoonfull HX711 load-cell bridge (GPIO -> TCP 127.0.0.1:9100)
+After=multi-user.target
+
+[Service]
+User=__USER__
+ExecStart=/usr/bin/python3 /opt/spoonfull/hx711_bridge.py --port 9100
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

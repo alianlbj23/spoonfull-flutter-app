@@ -1,8 +1,10 @@
 # Spoonfull 送餐系統 — 機台端 App
 
-Spoonfull 機台端 App 裝在病房送餐車的觸控螢幕上(Jetson Nano,1024×600 橫向)。護理/送餐人員依序選病房、床位、膳食與時段,在**送餐前**和**回收後**各拍一張照片。照片連同紀錄以 HTTP 上傳到後端(以下稱「接收器」),接收器回傳紀錄 ID 與 AI 剩食辨識結果。
+Spoonfull 機台端 App 裝在病房送餐車的觸控螢幕上(Jetson Orin Nano 或 Raspberry Pi 5,1024×600 橫向)。護理/送餐人員依序選病房、床位、膳食與時段,在**送餐前**和**回收後**各拍一張照片並**自動秤整盤重量**。照片、重量與紀錄以 HTTP 上傳到後端(以下稱「接收器」,即 server 的 `devices` 模組),接收器立刻存檔回 200,AI 分析在 server 端非同步進行。
 
-這份文件主要寫給**要實作接收器的人**:機台什麼時候發什麼請求、請求長什麼樣、接收器要怎麼回應,都在下面。完整的原始規格請見 [flutter_architecture_spec.md](flutter_architecture_spec.md)。若規格與程式碼不一致,以本文件為準(本文件依程式碼實際行為撰寫)。
+**機台只做採集**:拍照、秤重、拍照品質檢查、壓縮、離線佇列、上傳。不跑任何 AI(見 [ARCHITECTURE.md](ARCHITECTURE.md) §2、§5)。
+
+這份文件主要寫給**要實作接收器的人**:機台什麼時候發什麼請求、請求長什麼樣、接收器要怎麼回應,都在下面。系統整體架構與 server 端規劃見 [ARCHITECTURE.md](ARCHITECTURE.md);機台硬體(相機、秤)與部署步驟見 [deploy/README.md](deploy/README.md)。若規格與程式碼不一致,以本文件為準(本文件依程式碼實際行為撰寫)。
 
 ---
 
@@ -12,21 +14,43 @@ Spoonfull 機台端 App 裝在病房送餐車的觸控螢幕上(Jetson Nano,1024
 flutter pub get
 
 # 連真的接收器
-flutter run -d linux          # Jetson Nano / Linux 桌面
+flutter run -d linux          # Jetson Orin Nano / Raspberry Pi 5 / Linux 桌面
 flutter run -d windows
 
 # 還沒有接收器時,用內建假資料跑 (配對碼固定為 123456)
 flutter run -d windows --dart-define=USE_MOCK_API=true
 ```
 
+在 Windows / macOS 開發時,相機來源預設為「系統相機 / 選檔」(選一張圖片當照片),秤預設為「不使用秤」。到 **設定 → 硬體設定** 可改成:
+
+- **測試圖片資料夾**:把餐盒照片放進 [test_images/](test_images/),每次「下一步」依檔名順序取下一張(循環)。接 RealSense 之前,用真實照片走完整個上傳流程就用這個。
+- **模擬相機** / **模擬秤**:不需要任何檔案或硬體,自動產生合成圖與假重量。
+
+不經 App、直接用 `test_images/` 的照片加假資料打 server(配對 → 同步 → 上傳 → 去重),用 [tools/send_test_records.py](tools/send_test_records.py):
+
+```bash
+python tools/send_test_records.py --server http://192.168.0.10:8000 --place demo --code 482913 --repeat-last
+```
+
+**Linux 機台建置相依**:`clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev`;執行期需要 `gstreamer1.0-tools gstreamer1.0-plugins-good v4l-utils`。開機自動全螢幕 (kiosk) 的安裝步驟見 [deploy/README.md](deploy/README.md)。
+
 | dart-define | 值 | 說明 |
 |---|---|---|
 | `USE_MOCK_API` | `true` / 不設 | `true` 時使用 [mock_api_repository.dart](lib/data/api/mock_api_repository.dart),不發任何 HTTP 請求 |
 | `APP_ENV` | `dev`(預設)/ `test` / `prod` | 只影響 log 等級 |
+| `PAIRING_CODE` | 6 位數字 / 不設 | **測試用固定配對碼**。有設時,儲存伺服器設定後、每次啟動未配對時、以及收到 401 後,App 自動用這組碼配對,不跳鍵盤;server 端需在測試環境接受同一組碼。正式部署不要設 |
 
 > 伺服器位址**不寫死在程式裡**:由使用者在機台的設定畫面輸入(見第 2 節)。
 
 **Windows 建置注意**:[windows/CMakeLists.txt](windows/CMakeLists.txt) 已加入 `/utf-8` 與 `_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS`,用來解決非 UTF-8 系統語系(例如日文 CP932)及 VS 2026 下 `connectivity_plus` / `permission_handler_windows` 的編譯錯誤。請勿移除。
+
+每次建置 Windows 都看到 `Nuget.exe not found, trying to download or use cached version.`:這是 `permission_handler_windows` 的 CMake 在 PATH 上找不到 `nuget.exe`(它用 NuGet 安裝 C++/WinRT),找不到就印這行再用快取版本,**建置仍會成功**。要讓訊息消失,裝一次 NuGet 讓它在 PATH 上:
+
+```powershell
+winget install Microsoft.NuGet
+```
+
+裝完重開終端機即可。Linux 機台沒有這段 CMake,不受影響。
 
 ---
 
@@ -59,29 +83,35 @@ main()
  └─ 點左上齒輪 → 伺服器設定畫面
       輸入:伺服器位址、埠號、場域 (place_id)
       儲存 ─┬─ 尚未配對 → 配對碼畫面 → 輸入 6 位數配對碼
-            │                 └─ POST device_pair.php → 取得 token
+            │                 └─ POST api/machine/pair/ → 取得 token
             │                      └─ 立即強制同步 (rooms / beds / meals)
             └─ 已配對且位址/埠/場域有變更 → 自動解除配對並清除快取 → 需重新配對
-歡迎畫面「開始使用」→ 病房列表 → 床位 → 選膳食/時段/餐前或餐後 → 拍照 → 確認 → 上傳
+歡迎畫面「開始使用」→ 病房列表 → 床位 → 餐前/餐後 → 放餐盒 → 拍照 + 秤重 (同時) → 品質檢查 → 確認 (時段/膳食/重量) → 上傳
 ```
+
+**拍照 + 秤重**(第一次使用前先到「設定 → 硬體設定」選相機與秤,詳見 [deploy/README.md](deploy/README.md)):
+
+1. 相機擷取一張原始照片(Linux 用 GStreamer `v4l2src` / `nvarguscamerasrc` 或 `rpicam-still`;Android/iOS 用系統相機;桌面開發用選檔),同時讀秤直到讀數穩定(連續 5 筆差距 ≤ 2 g,或秤自己回報穩定;最多等 6 秒)。
+2. 照片縮到**長邊 1280、JPEG 品質 80**,並做純 CPU 品質檢查:過暗、過亮、模糊(Laplacian 變異數)、餐盒不在畫面(與「空秤參考照」比對,沒有參考照則看畫面中央邊緣密度與對比)。不通過時提示重拍,也可選「仍要使用」。
+3. 確認畫面左下顯示重量與來源(秤 / 手動),可「重新秤重」或「手動輸入」;沒有秤時不送重量。
 
 **BASE_URL 組法**([device_config.dart](lib/data/models/device_config.dart) `ServerSettings.baseUrl`):
 
 - 位址沒寫協定時預設為 `http://`;要用 HTTPS 請在位址欄直接輸入 `https://…`
 - 結果格式為 `http://{host}:{port}/`;位址可帶子路徑,例如 `192.168.1.10/spoonfull` → `http://192.168.1.10:8080/spoonfull/`
-- 所有 API 路徑都是**相對路徑**,接在 BASE_URL 後面,例如 `http://192.168.1.10:8080/work/api/room_data.php`
+- 所有 API 路徑都是**相對路徑**,接在 BASE_URL 後面,例如 `http://192.168.1.10:8080/api/machine/rooms/`
 
 ### 2.3 什麼時候會發請求
 
 | 時機 | 發出的請求 |
 |---|---|
 | 啟動、儲存設定、配對成功後 | `GET /`(ping,只要有任何 HTTP 回應就算可連線,5 秒逾時) |
-| 配對 | `POST work/api/device_pair.php` |
+| 配對 | `POST api/machine/pair/` |
 | 配對成功後 | 三個查詢 API 全部重抓(不帶 `last_updated`) |
 | 啟動、網路恢復時 | 查詢 API:病房/床位超過 1 小時、膳食超過 24 小時才重抓 |
 | 每 30 分鐘 | 三個查詢 API 全部重抓 |
-| 按下上傳 | `POST work/api/meal_record.php`(離線則先進佇列) |
-| 佇列重試到期 | `POST work/api/meal_record.php` |
+| 按下上傳 | `POST api/machine/records/`(離線則先進佇列) |
+| 佇列重試到期 | `POST api/machine/records/` |
 
 ---
 
@@ -91,6 +121,7 @@ main()
 
 | 項目 | 規格 |
 |---|---|
+| 路徑 | 全部相對於 BASE_URL,**結尾一律有斜線**(`api/machine/.../`),避免 Django `APPEND_SLASH` 把 POST 轉址而丟掉 body |
 | 協定 | HTTP/1.1(院內區網通常是 `http`,也支援 `https`) |
 | 編碼 | 回應 body 一律以 **UTF-8** 解碼 |
 | 時間 | 所有時間戳都是 **Unix timestamp(秒)**,不是毫秒 |
@@ -143,7 +174,7 @@ main()
 
 ## 4. API 規格
 
-### 4.1 `POST work/api/device_pair.php` — 機台配對
+### 4.1 `POST api/machine/pair/` — 機台配對
 
 **不帶** `Authorization`。`Content-Type: application/json`
 
@@ -183,7 +214,7 @@ main()
 - 建議錯誤碼:`INVALID_PAIRING_CODE`、`DEVICE_ALREADY_PAIRED`、`SERVER_ERROR`
 - 同一台機台(同 `device_id`)可能因為更改設定或 401 而**再次配對**,接收器應允許重新配對並發放新 token
 
-### 4.2 `GET work/api/room_data.php` — 病房列表
+### 4.2 `GET api/machine/rooms/` — 病房列表
 
 查詢參數:`place_id`(一定會帶)、`last_updated`(選填,見 4.5)
 
@@ -199,7 +230,7 @@ main()
 }
 ```
 
-### 4.3 `GET work/api/bed_data.php` — 床位與病患
+### 4.3 `GET api/machine/beds/` — 床位與病患
 
 查詢參數:`place_id`、`last_updated`(選填)。機台目前**不會**帶 `room_id`,而是一次抓整個場域。
 
@@ -227,7 +258,7 @@ main()
 - 空床的 `patient_id` 請給 `null` 或空字串;空床在機台上**無法**記錄
 - `room_id` 必須對得上 `room_data` 的 `room_id`
 
-### 4.4 `GET work/api/meal_data.php` — 膳食與用餐時段
+### 4.4 `GET api/machine/meals/` — 膳食與用餐時段
 
 查詢參數:`place_id`。**每次都是全量取代**(不支援增量)。
 
@@ -258,7 +289,7 @@ main()
 - 接收器也可以忽略 `last_updated` 一律回全量,這樣最簡單也正確。但要注意:增量模式下機台不會刪除資料,已刪除的病房/床位要等下一次全量同步(最多 30 分鐘)才會消失
 - `timestamp` 請用**伺服器時間**,不要用資料的最大 `updated_at`,以免漏掉同一秒內的變動
 
-### 4.6 `POST work/api/meal_record.php` — 上傳膳食紀錄(主要輸出)
+### 4.6 `POST api/machine/records/` — 上傳膳食紀錄(主要輸出)
 
 `Content-Type: multipart/form-data`,帶 `Authorization: Bearer …`
 
@@ -270,14 +301,28 @@ main()
 | `meal_id` | 文字 | 來自 meal_data |
 | `meal_time_slot` | 文字 | **`time_slot_id`**(例如 `T1`),不是顯示名稱 |
 | `before_after` | 文字 | `before`(送餐前)或 `after`(回收後) |
-| `capture_time` | 文字(數字) | 拍照時間,Unix 秒 |
+| `capture_time` | 文字(數字) | 拍照時間,Unix 秒(機台時鐘,機台應開 NTP)。server 存入 `captured_at` |
 | `device_id` | 文字 | 與配對時相同,可用來比對 token |
+| `client_record_id` | 文字 | **一定會帶**。App 本機紀錄的 UUID,**去重鍵**:同一 `client_record_id` 再送一次 → 回原本的 `record_id`,不新增 |
+| `weight_g` | 文字(數字,1 位小數) | 整盤重量(公克),餐前餐後各一次,**容器重量在餐前−餐後相減時自動抵消**。沒有秤或沒讀到時**不帶此欄位**,server 以菜單標準份量估算並標記 `weight_source=estimated` |
+| `edge_result` | 文字(JSON) | 選填,機台端即時檢查結果(ARCHITECTURE.md §6.5 預留欄位)。目前內容為 `{"quality_check": {...}, "weight_source": "scale" 或 "manual"}`,server 只存不處理 |
+
+`edge_result.quality_check` 範例:
+
+```json
+{ "mean_luma": 187.2, "dark_ratio": 0.0, "bright_ratio": 0.07, "blur_score": 170.9,
+  "tray_score": 0.06, "tray_score_method": "edges", "roi_contrast": 41.3,
+  "tray_detected": true, "issues": [] }
+```
+
+`issues` 可能的值:`tooDark`、`tooBright`、`blurry`、`trayMissing`(使用者選了「仍要使用」才會帶著問題上傳)。
 
 機台送出前已檢查過的限制(接收器仍應自行檢查):
 
 - 檔案 ≤ 5 MB,格式依檔頭判斷只接受 JPEG / PNG
-- 尺寸:長邊 480–4000、短邊 320–3000;相機拍攝時已縮到長邊 ≤ 1920、JPEG 品質 85
+- 尺寸:長邊 480–4000、短邊 320–3000;拍攝後已縮到**長邊 ≤ 1280、JPEG 品質 80**
 - `bed_id` 存在於該病房,且 `patient_id` 與床位目前的病患一致
+- `weight_g`(若有)為 0–20000 的有限數
 
 **成功回應**:
 
@@ -308,25 +353,22 @@ main()
 | `ai_result` | 否 | 可為 `null`。`leftover_percentage` 範圍 0–100,`confidence` 範圍 0–1,`note` 會顯示給使用者 |
 | 其他 | 否 | 機台目前不使用 `image_path`、`capture_time`、`created_at` |
 
-> **機台不會回頭查詢 AI 結果**。上傳後只顯示這次回應裡的 `ai_result`。如果 AI 是非同步處理,回 `ai_status: "pending"`、`ai_result: null` 即可,機台會顯示「待處理」。
+> **機台不會回頭查詢 AI 結果**。上傳後只顯示這次回應裡的 `ai_result`。依 ARCHITECTURE.md 的設計,server 收到照片立刻存檔回 200,分析由 `vision-worker` 排隊處理,所以正常回應就是 `ai_status: "pending"`、`ai_result: null`,機台會顯示「等待辨識」,結果在網頁上看。
 
 建議錯誤碼(請搭配 3.3 的狀態碼語意):
 
 | code | 建議狀態碼 |
 |---|---|
-| `INVALID_IMAGE_FORMAT`、`IMAGE_TOO_LARGE`、`INVALID_PATIENT_ID`、`INVALID_BED_ID` | 400 或 422(不重試) |
+| `INVALID_IMAGE_FORMAT`、`IMAGE_TOO_LARGE`、`INVALID_PATIENT_ID`、`INVALID_BED_ID` | 422(不重試) |
+| 菜色沒排給這位住民 | **不要拒絕**:照收並標記 `assignment_mismatch=True`(現場照片拒了就沒了) |
 | `TOKEN_EXPIRED` | 401 |
 | `UPLOAD_FAILED` | 500(會重試) |
 
 #### ⚠️ 重複上傳(請務必處理)
 
-上傳請求**沒有帶冪等鍵**。如果接收器已經存檔,但回應在 60 秒內沒送回機台(逾時、斷線),機台會重送同一筆資料。接收器應以
+如果接收器已經存檔,但回應在 60 秒內沒送回機台(逾時、斷線),機台會重送同一筆資料。請以 **`client_record_id`**(每筆紀錄唯一的 UUID,`FoodIntake.client_record_id` unique)判斷是否重複;遇到重複時**回傳原本那筆的 `record_id` 與成功回應**,不要回錯誤,也不要新增一筆。
 
-```
-(device_id, bed_id, meal_id, meal_time_slot, before_after, capture_time)
-```
-
-判斷是否重複。遇到重複時**回傳原本那筆的 `record_id` 與成功回應**,不要回錯誤,也不要新增一筆。
+> 舊版 App(沒有 `client_record_id`)可退回用 `(device_id, bed_id, meal_id, meal_time_slot, before_after, capture_time)` 判斷。
 
 ---
 
@@ -352,7 +394,7 @@ def auth():
 @app.get("/")
 def ping(): return "ok"
 
-@app.post("/work/api/device_pair.php")
+@app.post("/api/machine/pair/")
 def pair():
     body = request.get_json()
     if body.get("pairing_code") != "123456":
@@ -362,7 +404,7 @@ def pair():
     return ok({"device_id": body["device_id"], "device_token": token,
                "token_type": "Bearer", "expires_in": 86400})
 
-@app.get("/work/api/room_data.php")
+@app.get("/api/machine/rooms/")
 def rooms():
     if not auth(): return fail(401, "TOKEN_EXPIRED", "認證失敗,需要重新配對")
     p = request.args["place_id"]
@@ -370,7 +412,7 @@ def rooms():
                           "beds_count": 1, "updated_at": int(time.time())}],
                "timestamp": int(time.time())})
 
-@app.get("/work/api/bed_data.php")
+@app.get("/api/machine/beds/")
 def beds():
     if not auth(): return fail(401, "TOKEN_EXPIRED", "認證失敗,需要重新配對")
     p = request.args["place_id"]
@@ -379,7 +421,7 @@ def beds():
                          "updated_at": int(time.time())}],
                "timestamp": int(time.time())})
 
-@app.get("/work/api/meal_data.php")
+@app.get("/api/machine/meals/")
 def meals():
     if not auth(): return fail(401, "TOKEN_EXPIRED", "認證失敗,需要重新配對")
     p = request.args["place_id"]
@@ -389,18 +431,20 @@ def meals():
                                "start_time": "11:30", "end_time": "13:00"}],
                "timestamp": int(time.time())})
 
-@app.post("/work/api/meal_record.php")
+@app.post("/api/machine/records/")
 def meal_record():
     device = auth()
     if not device: return fail(401, "TOKEN_EXPIRED", "認證失敗,需要重新配對")
     f, form = request.files.get("image"), request.form
     if f is None or f.mimetype not in ("image/jpeg", "image/png"):
         return fail(400, "INVALID_IMAGE_FORMAT", "僅支援 JPG / PNG 圖片")
-    key = (form["device_id"], form["bed_id"], form["meal_id"],
+    key = form.get("client_record_id") or (form["device_id"], form["bed_id"], form["meal_id"],
            form["meal_time_slot"], form["before_after"], form["capture_time"])
     if key not in RECORDS:                       # 重複上傳 → 回原本的 record_id
         rid = f"SRV-{uuid.uuid4().hex[:8]}"
         f.save(f"uploads/{rid}{'.png' if f.mimetype == 'image/png' else '.jpg'}")
+        weight = form.get("weight_g")           # 沒有秤時不會有這個欄位
+        print(rid, "weight_g=", weight, "edge_result=", form.get("edge_result"))
         RECORDS[key] = rid
     return ok({"record_id": RECORDS[key], "capture_time": int(form["capture_time"]),
                "ai_status": "pending", "ai_result": None, "created_at": int(time.time())})
@@ -415,11 +459,11 @@ if __name__ == "__main__":
 用 curl 模擬機台上傳:
 
 ```bash
-curl -X POST http://localhost:8080/work/api/meal_record.php \
+curl -X POST http://localhost:8080/api/machine/records/ \
   -H "Authorization: Bearer <token>" \
   -F image=@meal.jpg -F bed_id=R101-B1 -F patient_id=P1 -F meal_id=M1 \
   -F meal_time_slot=T2 -F before_after=before -F capture_time=1726900200 \
-  -F device_id=<device_id>
+  -F device_id=<device_id> -F client_record_id=$(uuidgen) -F weight_g=412.5
 ```
 
 ---
@@ -432,7 +476,14 @@ curl -X POST http://localhost:8080/work/api/meal_record.php \
 | HTTP 封裝、回應解析、狀態碼對應 | [lib/data/api/api_client.dart](lib/data/api/api_client.dart) |
 | 每個 API 送什麼、讀什麼 | [lib/data/api/api_repository.dart](lib/data/api/api_repository.dart)、[lib/data/models/](lib/data/models/) |
 | 假資料(可當作回應範本) | [lib/data/api/mock_api_repository.dart](lib/data/api/mock_api_repository.dart) |
-| 配對 / token | [lib/services/device_pairing_service.dart](lib/services/device_pairing_service.dart) |
+| 配對 / token | [lib/services/device_pairing_service.dart](lib/services/device_pairing_service.dart);Linux 無 keyring 時退回檔案儲存:[lib/data/local/secure_token_storage.dart](lib/data/local/secure_token_storage.dart) |
+| 相機擷取 (GStreamer / rpicam / image_picker / 模擬) | [lib/services/hardware/camera_service.dart](lib/services/hardware/camera_service.dart) |
+| 秤 (USB HID / 序列埠 / HX711 bridge / 模擬)、穩定判斷 | [lib/services/hardware/scale_service.dart](lib/services/hardware/scale_service.dart) |
+| 壓縮 (1280 / q80) 與品質檢查 | [lib/services/hardware/image_pipeline.dart](lib/services/hardware/image_pipeline.dart)、[lib/core/utils/image_quality_analyzer.dart](lib/core/utils/image_quality_analyzer.dart) |
+| 拍照 + 秤重流程、空秤參考照 | [lib/services/hardware/hardware_service.dart](lib/services/hardware/hardware_service.dart)、[lib/ui/screens/capture_flow.dart](lib/ui/screens/capture_flow.dart) |
+| 硬體設定頁 | [lib/ui/screens/hardware_settings_screen.dart](lib/ui/screens/hardware_settings_screen.dart) |
+| 機台安裝 (kiosk、udev、NTP、HX711 bridge) | [deploy/](deploy/) |
+| 不經 App 打 server 的測試腳本 | [tools/send_test_records.py](tools/send_test_records.py) |
 | 上傳與離線佇列 | [lib/services/record_service.dart](lib/services/record_service.dart)、[lib/services/offline_queue_service.dart](lib/services/offline_queue_service.dart) |
 | 同步時機 | [lib/services/sync_service.dart](lib/services/sync_service.dart) |
 | 啟動流程 | [lib/main.dart](lib/main.dart)、[lib/state/device_state.dart](lib/state/device_state.dart) |

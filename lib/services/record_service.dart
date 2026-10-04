@@ -1,10 +1,5 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
-import 'package:image_picker/image_picker.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 
 import '../core/errors/app_exception.dart';
@@ -14,10 +9,13 @@ import '../core/utils/validators.dart';
 import '../data/api/api_repository.dart';
 import '../data/models/api_models.dart';
 import '../data/models/bed_data.dart';
+import '../data/models/image_quality.dart';
 import '../data/models/local_meal_record.dart';
 import '../data/models/meal_data.dart';
+import '../data/models/weight_reading.dart';
 import 'connectivity_service.dart';
 import 'error_handling_service.dart';
+import 'hardware/hardware_service.dart';
 import 'local_storage_service.dart';
 import 'offline_queue_service.dart';
 
@@ -30,7 +28,7 @@ class UploadOutcome {
   final String message;
 }
 
-/// 膳食紀錄:拍照、驗證、本機保存、上傳 (規格 4.3、5.2、9.3)。
+/// 膳食紀錄:拍照 + 秤重、驗證、本機保存、上傳 (規格 4.3、5.2、9.3;ARCHITECTURE.md §5.1、§6.4)。
 class RecordService {
   RecordService({
     required this._api,
@@ -38,55 +36,23 @@ class RecordService {
     required this._queue,
     required this._connectivity,
     required this._errors,
-    ImagePicker? picker,
-  }) : _picker = picker ?? ImagePicker();
+    required this._hardware,
+  });
 
   final ApiRepository _api;
   final LocalStorageService _storage;
   final OfflineQueueService _queue;
   final ConnectivityService _connectivity;
   final ErrorHandlingService _errors;
-  final ImagePicker _picker;
+  final HardwareService _hardware;
 
-  bool get _isMobile =>
-      !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  HardwareService get hardware => _hardware;
 
-  /// 開啟相機拍照;平台不支援相機時 (例如 Linux 桌面) 改為選擇檔案。
-  /// 回傳複製到 App 目錄後的照片路徑,使用者取消時回傳 null。
-  Future<String?> captureImage() async {
-    if (_isMobile) {
-      final status = await Permission.camera.request();
-      if (!status.isGranted) {
-        throw const AppException(
-          AppErrorType.localValidation,
-          '需要相機權限才能拍攝照片',
-        );
-      }
-    }
-    final source = _picker.supportsImageSource(ImageSource.camera)
-        ? ImageSource.camera
-        : ImageSource.gallery;
-    final picked = await _picker.pickImage(
-      source: source,
-      maxWidth: 1920,
-      maxHeight: 1920,
-      imageQuality: 85,
-    );
-    if (picked == null) return null;
-    return _persist(picked);
-  }
+  /// 拍照 (擷取 → 壓縮 → 品質檢查) 並同時讀秤。使用者取消時回傳 null。
+  Future<CaptureResult?> capture() => _hardware.capture();
 
-  Future<String> _persist(XFile file) async {
-    final dir = Directory(
-      p.join((await getApplicationDocumentsDirectory()).path, 'meal_images'),
-    );
-    await dir.create(recursive: true);
-    var ext = p.extension(file.path).toLowerCase();
-    if (ext != '.png') ext = '.jpg';
-    final target = p.join(dir.path, '${const Uuid().v4()}$ext');
-    await file.saveTo(target);
-    return target;
-  }
+  /// 重新秤重 (不重拍)。
+  Future<WeightReading?> readWeight() => _hardware.readWeight();
 
   Future<void> discardImage(String path) async {
     try {
@@ -105,13 +71,17 @@ class RecordService {
     required String imagePath,
     required String deviceId,
     DateTime? captureTime,
+    double? weightG,
+    WeightSource weightSource = WeightSource.none,
+    ImageQualityReport? quality,
   }) async {
     // 1. 本機驗證 — 失敗直接丟出,不加入佇列
     await Validators.image(imagePath);
     Validators.bedAndPatient(bed: bed, roomBeds: roomBeds);
     Validators.meal(meal.mealId, meals);
+    Validators.weight(weightG);
 
-    // 2. 記錄到本機 (sync_status = pending)
+    // 2. 記錄到本機 (sync_status = pending);localId 同時是 server 的去重鍵
     final now = nowUnix();
     var record = LocalMealRecord(
       localId: const Uuid().v4(),
@@ -122,6 +92,9 @@ class RecordService {
       beforeAfter: phase,
       imagePath: imagePath,
       captureTime: captureTime == null ? now : toUnix(captureTime),
+      weightG: weightG,
+      weightSource: weightG == null ? WeightSource.none : weightSource,
+      quality: quality,
       createdAt: now,
       updatedAt: now,
     );
@@ -185,6 +158,14 @@ class RecordService {
         beforeAfter: r.beforeAfter.name,
         captureTime: r.captureTime,
         deviceId: deviceId,
+        clientRecordId: r.localId,
+        weightG: r.weightG,
+        edgeResult: r.quality == null
+            ? null
+            : {
+                'quality_check': r.quality!.toJson(),
+                'weight_source': r.weightSource.name,
+              },
       );
 
   /// 上傳成功:保存 server 回傳的 record_id 與 AI 結果。

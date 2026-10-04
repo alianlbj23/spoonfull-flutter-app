@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../config/app_config.dart';
+import '../core/utils/logger.dart';
 import '../data/models/device_config.dart';
 import '../services/app_services.dart';
 
@@ -39,7 +41,20 @@ class DeviceState extends ChangeNotifier {
     notifyListeners();
     await _services.sync.start();
     unawaited(checkServer());
-    if (valid) unawaited(_services.sync.syncAll());
+    if (valid) {
+      unawaited(_services.sync.syncAll());
+    } else {
+      unawaited(autoPair());
+    }
+  }
+
+  /// 有 `--dart-define=PAIRING_CODE` 且已填伺服器設定時自動配對 (開發 / 測試用)。
+  /// 回傳是否配對成功;沒有設定固定碼時直接回 false。
+  Future<bool> autoPair() async {
+    if (!AppConfig.hasAutoPairingCode || isPaired || !isConfigured) return false;
+    if (status == PairingStatus.pairing) return false;
+    Log.i('auto pairing with PAIRING_CODE');
+    return pair(AppConfig.autoPairingCode);
   }
 
   Future<void> checkServer() async {
@@ -94,6 +109,8 @@ class DeviceState extends ChangeNotifier {
     if (!isPaired) return;
     forcedLogoutMessage = '認證失敗,需要重新配對';
     await unpair();
+    // 固定配對碼模式:被踢掉就自動重配,不用人工介入。
+    if (await autoPair()) forcedLogoutMessage = null;
   }
 
   void consumeForcedLogout() => forcedLogoutMessage = null;

@@ -1,13 +1,14 @@
-/// 全域常數:API 路徑、快取有效期、重試策略、圖片限制。
+/// 全域常數:API 路徑、快取有效期、重試策略、圖片限制、機台硬體預設。
 class AppConstants {
   AppConstants._();
 
-  // --- API endpoints (規格 4) ---
-  static const String devicePairPath = 'work/api/device_pair.php';
-  static const String roomDataPath = 'work/api/room_data.php';
-  static const String bedDataPath = 'work/api/bed_data.php';
-  static const String mealDataPath = 'work/api/meal_data.php';
-  static const String mealRecordPath = 'work/api/meal_record.php';
+  // --- API endpoints (ARCHITECTURE.md §6.1) ---
+  // 路徑結尾一律有斜線,避免 Django APPEND_SLASH 轉址丟掉 POST body。
+  static const String devicePairPath = 'api/machine/pair/';
+  static const String roomDataPath = 'api/machine/rooms/';
+  static const String bedDataPath = 'api/machine/beds/';
+  static const String mealDataPath = 'api/machine/meals/';
+  static const String mealRecordPath = 'api/machine/records/';
 
   static const Duration requestTimeout = Duration(seconds: 15);
   static const Duration uploadTimeout = Duration(seconds: 60);
@@ -34,6 +35,57 @@ class AppConstants {
   static const int minImageShortSide = 320;
   static const int maxImageLongSide = 4000;
   static const int maxImageShortSide = 3000;
+
+  // --- 上傳前壓縮 (ARCHITECTURE.md §5.1):長邊 1280、JPEG 品質 80 ---
+  static const int uploadMaxLongSide = 1280;
+  static const int uploadJpegQuality = 80;
+
+  // --- 相機擷取 (預設解析度與暖機張數;USB 相機前幾張常曝光不足) ---
+  static const int captureWidth = 1280;
+  static const int captureHeight = 720;
+  static const int captureWarmupFrames = 8;
+  static const Duration captureTimeout = Duration(seconds: 20);
+
+  // --- 拍照品質檢查 (純 CPU,ARCHITECTURE.md §5.1) ---
+  /// 分析前先縮到此寬度,門檻皆以此尺度校正。
+  static const int qualityAnalysisWidth = 320;
+
+  /// 平均亮度 (0-255) 低於此值 → 過暗。
+  static const double qualityDarkMeanLuma = 60;
+
+  /// 暗像素 (<40) 比例超過此值 → 過暗。
+  static const double qualityDarkPixelRatio = 0.6;
+
+  /// 平均亮度高於此值 → 過亮。
+  static const double qualityBrightMeanLuma = 215;
+
+  /// 爆白像素 (>235) 比例超過此值 → 過亮。
+  static const double qualityBrightPixelRatio = 0.3;
+
+  /// (3x3 平滑後) Laplacian 變異數低於此值 → 模糊。
+  static const double qualityBlurVarianceMin = 50;
+
+  /// |Laplacian| 超過此值的像素算邊緣 (3x3 平滑後,雜訊約 ±5)。
+  static const int qualityEdgeLaplacianMin = 40;
+
+  /// 畫面中央 ROI 佔長寬的比例 (餐盒放固定位置)。
+  static const double qualityTrayRoiFraction = 0.6;
+
+  /// 有空秤參考照時:ROI 與參考照的平均絕對差低於此值 → 餐盒不在畫面。
+  static const double qualityTrayRefDiffMin = 12;
+
+  /// 沒有參考照時:ROI 邊緣密度低於此值,且 ROI 亮度標準差也低於
+  /// [qualityTrayContrastMin] → 餐盒不在畫面。
+  static const double qualityTrayEdgeDensityMin = 0.02;
+  static const double qualityTrayContrastMin = 12;
+
+  // --- 秤重 ---
+  static const Duration scaleStableTimeout = Duration(seconds: 6);
+  static const int scaleStableWindow = 5;
+  static const double scaleStableToleranceG = 2.0;
+
+  /// 低於此重量視為秤上沒有餐盒。
+  static const double scaleEmptyThresholdG = 5.0;
 
   static const int pairingCodeLength = 6;
 

@@ -46,6 +46,14 @@ class Validators {
     }
   }
 
+  /// 整盤重量:可省略;有值時必須是 0 ~ 20 kg 的有限數。
+  static void weight(double? grams) {
+    if (grams == null) return;
+    if (!grams.isFinite || grams < 0 || grams > 20000) {
+      throw _invalid('重量 ${grams.toStringAsFixed(0)} g 不合理,請重新秤重', 'INVALID_WEIGHT');
+    }
+  }
+
   /// 依檔頭判斷 MIME,只允許 JPEG / PNG。
   static String? detectMime(Uint8List bytes) {
     if (bytes.length >= 3 &&

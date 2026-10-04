@@ -15,7 +15,7 @@ Future<void> _pumpApp(WidgetTester tester, TestEnv env) async {
 /// 結束前卸載畫面並停止同步計時器。
 Future<void> _teardown(WidgetTester tester, TestEnv env) async {
   await tester.pumpWidget(const SizedBox());
-  await env.services.dispose();
+  await env.dispose();
 }
 
 Future<void> _enterOnKeypad(WidgetTester tester, String digits) async {

@@ -9,6 +9,7 @@ import '../../data/models/room_data.dart';
 import '../../state/record_state.dart';
 import '../widgets/app_assets.dart';
 import '../widgets/buttons.dart';
+import 'capture_flow.dart';
 import 'photo_confirm_screen.dart';
 
 /// 新增食物攝取紀錄:選擇餐前 / 餐後 → 確認放入餐點 → 拍照。
@@ -30,15 +31,16 @@ class MealRecordScreen extends StatelessWidget {
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     try {
-      final path = await state.captureImage();
-      if (path == null) return;
+      // 拍照 + 秤重 + 品質檢查 (ARCHITECTURE.md §5.1)
+      final capture = await runCaptureFlow(context);
+      if (capture == null) return;
       await navigator.push(
         MaterialPageRoute<void>(
           builder: (_) => PhotoConfirmScreen(
             room: room,
             bed: bed,
             phase: phase,
-            imagePath: path,
+            capture: capture,
           ),
         ),
       );
