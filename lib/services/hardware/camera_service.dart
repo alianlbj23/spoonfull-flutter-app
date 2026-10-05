@@ -245,20 +245,27 @@ class LibcameraCameraService extends CameraService {
 }
 
 /// image_picker:Android / iOS 開相機,桌面平台為選擇檔案 (開發用)。
+///
+/// [filesOnly] 為 true 時一律選擇檔案 (行動裝置開相簿),給「選擇檔案」按鈕用。
 class ImagePickerCameraService extends CameraService {
-  ImagePickerCameraService({ImagePicker? picker})
+  ImagePickerCameraService({ImagePicker? picker, this.filesOnly = false})
     : _picker = picker ?? ImagePicker();
 
   final ImagePicker _picker;
+  final bool filesOnly;
 
   bool get _isMobile => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
 
+  /// 這個 picker 實際會開相機 (而不是選檔)。
+  bool get opensCamera =>
+      !filesOnly && _picker.supportsImageSource(ImageSource.camera);
+
   @override
-  String get description => _isMobile ? '系統相機' : '選擇圖片檔案';
+  String get description => opensCamera ? '系統相機' : '選擇圖片檔案';
 
   @override
   Future<String?> capture(String outputPath) async {
-    if (_isMobile) {
+    if (opensCamera && _isMobile) {
       final status = await Permission.camera.request();
       if (!status.isGranted) {
         throw const AppException(
@@ -267,10 +274,9 @@ class ImagePickerCameraService extends CameraService {
         );
       }
     }
-    final source = _picker.supportsImageSource(ImageSource.camera)
-        ? ImageSource.camera
-        : ImageSource.gallery;
-    final picked = await _picker.pickImage(source: source);
+    final picked = await _picker.pickImage(
+      source: opensCamera ? ImageSource.camera : ImageSource.gallery,
+    );
     if (picked == null) return null;
     var ext = p.extension(picked.path).toLowerCase();
     if (ext != '.png') ext = '.jpg';

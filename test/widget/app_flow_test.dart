@@ -146,6 +146,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('確認放入餐點後進行下一步'), findsOneWidget);
     expect(find.byKey(const Key('next-step')), findsOneWidget);
+    expect(find.byKey(const Key('choose-file')), findsOneWidget);
 
     // 返回關閉對話框
     debugPrint("STEP 28");

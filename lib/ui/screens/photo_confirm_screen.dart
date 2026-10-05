@@ -28,12 +28,16 @@ class PhotoConfirmScreen extends StatefulWidget {
     required this.bed,
     required this.phase,
     required this.capture,
+    this.captureMethod = CaptureMethod.camera,
   });
 
   final RoomData room;
   final BedData bed;
   final MealPhase phase;
   final CaptureResult capture;
+
+  /// 這張照片的來源,重拍時沿用。
+  final CaptureMethod captureMethod;
 
   @override
   State<PhotoConfirmScreen> createState() => _PhotoConfirmScreenState();
@@ -78,7 +82,10 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
   Future<void> _retake() async {
     final state = context.read<RecordState>();
     try {
-      final capture = await runCaptureFlow(context);
+      final capture = await runCaptureFlow(
+        context,
+        method: widget.captureMethod,
+      );
       if (capture == null) return;
       await state.discardImage(_imagePath);
       setState(() {

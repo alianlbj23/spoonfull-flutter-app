@@ -49,7 +49,9 @@ class RecordService {
   HardwareService get hardware => _hardware;
 
   /// 拍照 (擷取 → 壓縮 → 品質檢查) 並同時讀秤。使用者取消時回傳 null。
-  Future<CaptureResult?> capture() => _hardware.capture();
+  Future<CaptureResult?> capture({
+    CaptureMethod method = CaptureMethod.camera,
+  }) => _hardware.capture(method: method);
 
   /// 重新秤重 (不重拍)。
   Future<WeightReading?> readWeight() => _hardware.readWeight();

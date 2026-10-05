@@ -11,6 +11,7 @@ import 'package:spoonfull_flutter_app/data/models/image_quality.dart';
 import 'package:spoonfull_flutter_app/data/models/local_meal_record.dart';
 import 'package:spoonfull_flutter_app/data/models/weight_reading.dart';
 import 'package:spoonfull_flutter_app/services/hardware/camera_service.dart';
+import 'package:spoonfull_flutter_app/services/hardware/hardware_service.dart';
 import 'package:spoonfull_flutter_app/services/record_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
@@ -25,6 +26,23 @@ class _RecordingApi extends MockApiRepository {
   Future<MealRecordResult> uploadMealRecord(MealRecordUpload upload) {
     uploads.add(upload);
     return super.uploadMealRecord(upload);
+  }
+}
+
+/// 記下被呼叫幾次的模擬相機;[cancel] 時模擬使用者取消。
+class _CountingCamera extends CameraService {
+  _CountingCamera({this.cancel = false});
+  final bool cancel;
+  int calls = 0;
+
+  @override
+  String get description => 'counting';
+
+  @override
+  Future<String?> capture(String outputPath) async {
+    calls++;
+    if (cancel) return null;
+    return const MockCameraService(width: 640, height: 480).capture(outputPath);
   }
 }
 
@@ -85,6 +103,37 @@ void main() {
     expect(await File('${result.imagePath}.raw.jpg').exists(), isFalse);
   });
 
+  test('file capture uses the file picker instead of the camera', () async {
+    final camera = _CountingCamera();
+    final picker = _CountingCamera();
+    final fileEnv = await createTestEnv(camera: camera, filePicker: picker);
+    addTearDown(fileEnv.dispose);
+
+    final result = await fileEnv.services.records.capture(
+      method: CaptureMethod.file,
+    );
+    expect(result, isNotNull);
+    expect(result!.quality.passed, isTrue, reason: '${result.quality}');
+    expect(result.weight?.grams, testScaleWeightG);
+    expect(picker.calls, 1);
+    expect(camera.calls, 0);
+
+    await fileEnv.services.records.capture();
+    expect(camera.calls, 1);
+    expect(picker.calls, 1);
+  });
+
+  test('cancelling the file picker returns null', () async {
+    final fileEnv = await createTestEnv(
+      filePicker: _CountingCamera(cancel: true),
+    );
+    addTearDown(fileEnv.dispose);
+    expect(
+      await fileEnv.services.records.capture(method: CaptureMethod.file),
+      isNull,
+    );
+  });
+
   test('upload sends client_record_id, weight_g and edge_result', () async {
     final capture = (await env.services.records.capture())!;
     final outcome = await upload(
@@ -127,28 +176,34 @@ void main() {
     expect(api.uploads, isEmpty);
   });
 
-  test('re-sending the same client_record_id returns the same record_id', () async {
-    final capture = (await env.services.records.capture())!;
-    final outcome = await upload(imagePath: capture.imagePath);
-    final first = api.uploads.single;
-    final again = await api.uploadMealRecord(first);
-    expect(again.recordId, outcome.record.recordId);
-  });
+  test(
+    're-sending the same client_record_id returns the same record_id',
+    () async {
+      final capture = (await env.services.records.capture())!;
+      final outcome = await upload(imagePath: capture.imagePath);
+      final first = api.uploads.single;
+      final again = await api.uploadMealRecord(first);
+      expect(again.recordId, outcome.record.recordId);
+    },
+  );
 
-  test('queued upload keeps weight and client_record_id through restart', () async {
-    env.connectivity.online = false;
-    await pumpEventQueue();
-    final capture = (await env.services.records.capture())!;
-    await upload(
-      imagePath: capture.imagePath,
-      weightG: 388.4,
-      source: WeightSource.manual,
-    );
-    final item = (await env.services.queue.pendingItems()).single;
-    final restored = MealRecordUpload.fromJson(item.requestData);
-    expect(restored.weightG, 388.4);
-    expect(restored.clientRecordId, item.requestData['local_id']);
-  });
+  test(
+    'queued upload keeps weight and client_record_id through restart',
+    () async {
+      env.connectivity.online = false;
+      await pumpEventQueue();
+      final capture = (await env.services.records.capture())!;
+      await upload(
+        imagePath: capture.imagePath,
+        weightG: 388.4,
+        source: WeightSource.manual,
+      );
+      final item = (await env.services.queue.pendingItems()).single;
+      final restored = MealRecordUpload.fromJson(item.requestData);
+      expect(restored.weightG, 388.4);
+      expect(restored.clientRecordId, item.requestData['local_id']);
+    },
+  );
 
   test('mock camera without tray fails the quality check', () async {
     await env.dispose();
@@ -184,7 +239,10 @@ void main() {
     );
     // 測試注入的秤是固定的,設定仍要保存
     expect(env.services.storage.hardwareConfig.scale.kind, ScaleKind.none);
-    expect(env.services.storage.hardwareConfig.camera.source, CameraSource.auto);
+    expect(
+      env.services.storage.hardwareConfig.camera.source,
+      CameraSource.auto,
+    );
   });
 
   test('database upgrades v1 schema with the new record columns', () async {
@@ -207,10 +265,18 @@ void main() {
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
               error_message TEXT)''');
           await db.insert('meal_records', {
-            'local_id': 'old', 'bed_id': 'b', 'patient_id': 'p', 'meal_id': 'm',
-            'meal_time_slot': 't', 'before_after': 'before', 'image_path': '/x',
-            'capture_time': 1, 'ai_status': 'pending', 'sync_status': 'synced',
-            'created_at': 1, 'updated_at': 1,
+            'local_id': 'old',
+            'bed_id': 'b',
+            'patient_id': 'p',
+            'meal_id': 'm',
+            'meal_time_slot': 't',
+            'before_after': 'before',
+            'image_path': '/x',
+            'capture_time': 1,
+            'ai_status': 'pending',
+            'sync_status': 'synced',
+            'created_at': 1,
+            'updated_at': 1,
           });
         },
       ),

@@ -39,6 +39,9 @@ class RecordState extends ChangeNotifier {
   /// 是否有設定秤 (確認畫面決定要不要顯示重量面板)。
   bool get scaleEnabled => _services.hardware.scale.enabled;
 
+  /// 設定的相機能拍照 (否則只提供「選擇檔案」)。
+  bool get cameraAvailable => _services.hardware.cameraAvailable;
+
   /// 品質檢查是否會提示重拍。
   bool get qualityCheckEnabled =>
       _services.hardware.config.qualityCheckEnabled;
@@ -97,11 +100,13 @@ class RecordState extends ChangeNotifier {
   }
 
   /// 拍照 + 秤重 (ARCHITECTURE.md §5.1)。使用者取消時回傳 null。
-  Future<CaptureResult?> capture() async {
+  Future<CaptureResult?> capture({
+    CaptureMethod method = CaptureMethod.camera,
+  }) async {
     capturing = true;
     notifyListeners();
     try {
-      return await _services.records.capture();
+      return await _services.records.capture(method: method);
     } finally {
       capturing = false;
       notifyListeners();

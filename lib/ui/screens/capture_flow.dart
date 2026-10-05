@@ -15,12 +15,20 @@ enum _QualityChoice { retake, keep, cancel }
 
 /// 拍照流程 (ARCHITECTURE.md §5.1):
 /// 顯示「拍照中」→ 擷取 + 秤重 → 品質檢查不通過時提示重拍 → 回傳結果。
+/// [method] 為 [CaptureMethod.file] 時改為選擇圖片檔案,重拍也沿用同一種方式。
 /// 使用者取消時回傳 null;錯誤會往外丟,由呼叫端顯示。
-Future<CaptureResult?> runCaptureFlow(BuildContext context) async {
+Future<CaptureResult?> runCaptureFlow(
+  BuildContext context, {
+  CaptureMethod method = CaptureMethod.camera,
+}) async {
   final state = context.read<RecordState>();
   while (true) {
     if (!context.mounted) return null;
-    final result = await _withProgress(context, state.capture());
+    final result = await _withProgress(
+      context,
+      state.capture(method: method),
+      method,
+    );
     if (result == null) return null;
     if (!state.qualityCheckEnabled || result.quality.passed) return result;
     if (!context.mounted) return result;
@@ -44,17 +52,19 @@ Future<CaptureResult?> runCaptureFlow(BuildContext context) async {
   }
 }
 
-Future<T> _withProgress<T>(BuildContext context, Future<T> future) async {
+Future<T> _withProgress<T>(
+  BuildContext context,
+  Future<T> future,
+  CaptureMethod method,
+) async {
   final navigator = Navigator.of(context, rootNavigator: true);
   var dialogOpen = true;
   unawaited(
     showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const PopScope(
-        canPop: false,
-        child: CaptureProgressDialog(),
-      ),
+      builder: (_) =>
+          PopScope(canPop: false, child: CaptureProgressDialog(method: method)),
     ).then((_) => dialogOpen = false),
   );
   try {
@@ -66,7 +76,9 @@ Future<T> _withProgress<T>(BuildContext context, Future<T> future) async {
 
 /// 「拍照與秤重中」提示。
 class CaptureProgressDialog extends StatelessWidget {
-  const CaptureProgressDialog({super.key});
+  const CaptureProgressDialog({super.key, this.method = CaptureMethod.camera});
+
+  final CaptureMethod method;
 
   @override
   Widget build(BuildContext context) {
@@ -88,10 +100,12 @@ class CaptureProgressDialog extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 28),
-            Text(
-              scale ? '拍照與秤重中,請勿移動餐盒…' : '拍照中,請勿移動餐盒…',
-              style: AppText.size(32, color: AppColors.navy),
-            ),
+            Text(switch ((method, scale)) {
+              (CaptureMethod.file, true) => '選擇圖片與秤重中…',
+              (CaptureMethod.file, false) => '請選擇圖片檔案…',
+              (CaptureMethod.camera, true) => '拍照與秤重中,請勿移動餐盒…',
+              (CaptureMethod.camera, false) => '拍照中,請勿移動餐盒…',
+            }, style: AppText.size(32, color: AppColors.navy)),
           ],
         ),
       ),

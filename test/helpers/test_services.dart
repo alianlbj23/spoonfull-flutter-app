@@ -44,6 +44,7 @@ Future<TestEnv> createTestEnv({
   Map<String, Object> prefs = const {},
   bool online = true,
   CameraService? camera,
+  CameraService? filePicker,
   ScaleService? scale,
 }) async {
   SharedPreferences.setMockInitialValues(prefs);
@@ -64,6 +65,8 @@ Future<TestEnv> createTestEnv({
     hardwareBuilder: (storage) => HardwareService(
       storage: storage,
       camera: camera ?? const MockCameraService(width: 640, height: 480),
+      filePicker:
+          filePicker ?? const MockCameraService(width: 640, height: 480),
       scale:
           scale ??
           ScaleService(

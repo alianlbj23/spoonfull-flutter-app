@@ -6,13 +6,14 @@ import '../../core/theme/app_theme.dart';
 import '../../data/models/bed_data.dart';
 import '../../data/models/local_meal_record.dart';
 import '../../data/models/room_data.dart';
+import '../../services/hardware/hardware_service.dart';
 import '../../state/record_state.dart';
 import '../widgets/app_assets.dart';
 import '../widgets/buttons.dart';
 import 'capture_flow.dart';
 import 'photo_confirm_screen.dart';
 
-/// 新增食物攝取紀錄:選擇餐前 / 餐後 → 確認放入餐點 → 拍照。
+/// 新增食物攝取紀錄:選擇餐前 / 餐後 → 確認放入餐點 → 拍照或選擇檔案。
 class MealRecordScreen extends StatelessWidget {
   const MealRecordScreen({super.key, required this.room, required this.bed});
 
@@ -20,19 +21,19 @@ class MealRecordScreen extends StatelessWidget {
   final BedData bed;
 
   Future<void> _start(BuildContext context, MealPhase phase) async {
-    final proceed = await showDialog<bool>(
+    final state = context.read<RecordState>();
+    final method = await showDialog<CaptureMethod>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: 0.5),
-      builder: (_) => const PlaceMealDialog(),
+      builder: (_) => PlaceMealDialog(cameraAvailable: state.cameraAvailable),
     );
-    if (proceed != true || !context.mounted) return;
+    if (method == null || !context.mounted) return;
 
-    final state = context.read<RecordState>();
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     try {
       // 拍照 + 秤重 + 品質檢查 (ARCHITECTURE.md §5.1)
-      final capture = await runCaptureFlow(context);
+      final capture = await runCaptureFlow(context, method: method);
       if (capture == null) return;
       await navigator.push(
         MaterialPageRoute<void>(
@@ -41,6 +42,7 @@ class MealRecordScreen extends StatelessWidget {
             bed: bed,
             phase: phase,
             capture: capture,
+            captureMethod: method,
           ),
         ),
       );
@@ -76,10 +78,7 @@ class MealRecordScreen extends StatelessWidget {
             left: 448,
             top: 213,
             bottom: 72,
-            child: SizedBox(
-              width: 3,
-              child: ColoredBox(color: Colors.black),
-            ),
+            child: SizedBox(width: 3, child: ColoredBox(color: Colors.black)),
           ),
           Positioned(
             left: 60,
@@ -123,16 +122,17 @@ class _HeaderBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        borderRadius: const BorderRadius.horizontal(
-          right: Radius.circular(12),
-        ),
+        borderRadius: const BorderRadius.horizontal(right: Radius.circular(12)),
         gradient: const LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
           colors: [AppColors.blueButtonTop, AppColors.blueButtonBottom],
         ),
         border: Border(
-          top: BorderSide(color: Colors.white.withValues(alpha: 0.35), width: 3),
+          top: BorderSide(
+            color: Colors.white.withValues(alpha: 0.35),
+            width: 3,
+          ),
         ),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 60),
@@ -223,8 +223,13 @@ class _PhaseOption extends StatelessWidget {
 }
 
 /// 「確認放入餐點後進行下一步」對話框。
+/// 確認放入餐點,選擇用相機拍照或選擇圖片檔案;回傳 [CaptureMethod],返回時為 null。
+///
+/// [cameraAvailable] 為 false (例如桌面平台沒有相機) 時只顯示「選擇檔案」。
 class PlaceMealDialog extends StatelessWidget {
-  const PlaceMealDialog({super.key});
+  const PlaceMealDialog({super.key, this.cameraAvailable = true});
+
+  final bool cameraAvailable;
 
   @override
   Widget build(BuildContext context) {
@@ -246,7 +251,7 @@ class PlaceMealDialog extends StatelessWidget {
               child: BackTile(
                 width: 110,
                 height: 108,
-                onTap: () => Navigator.of(context).pop(false),
+                onTap: () => Navigator.of(context).pop(),
               ),
             ),
             Positioned(
@@ -275,32 +280,39 @@ class PlaceMealDialog extends StatelessWidget {
               child: Image.asset(AppAssets.robot, width: 252),
             ),
             Positioned(
-              left: 256,
+              left: 0,
+              right: 0,
               top: 408,
-              child: _NextButton(
-                onTap: () => Navigator.of(context).pop(true),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  if (cameraAvailable) ...[
+                    GradientTile(
+                      key: const Key('next-step'),
+                      label: '拍  照',
+                      width: 392,
+                      height: 88,
+                      fontSize: 40,
+                      onTap: () =>
+                          Navigator.of(context).pop(CaptureMethod.camera),
+                    ),
+                    const SizedBox(width: 24),
+                  ],
+                  GradientTile(
+                    key: const Key('choose-file'),
+                    label: '選擇檔案',
+                    color: TileColor.orange,
+                    width: cameraAvailable ? 300 : 392,
+                    height: 88,
+                    fontSize: 40,
+                    onTap: () => Navigator.of(context).pop(CaptureMethod.file),
+                  ),
+                ],
               ),
             ),
           ],
         ),
       ),
-    );
-  }
-}
-
-class _NextButton extends StatelessWidget {
-  const _NextButton({required this.onTap});
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GradientTile(
-      key: const Key('next-step'),
-      label: '下  一  步',
-      width: 392,
-      height: 88,
-      fontSize: 40,
-      onTap: onTap,
     );
   }
 }

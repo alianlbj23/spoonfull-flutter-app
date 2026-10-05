@@ -20,6 +20,9 @@ typedef DirectoryProvider = Future<Directory> Function();
 
 Future<Directory> _defaultDocumentsDir() => getApplicationDocumentsDirectory();
 
+/// 照片來源:用設定好的相機拍,或由使用者選擇圖片檔案。
+enum CaptureMethod { camera, file }
+
 /// 一次「拍照 + 秤重」的結果。
 class CaptureResult {
   const CaptureResult({
@@ -54,6 +57,7 @@ class HardwareService {
   HardwareService({
     required this._storage,
     CameraService? camera,
+    this._filePicker,
     ScaleService? scale,
     ImagePipeline? pipeline,
     DirectoryProvider? documentsDir,
@@ -67,6 +71,7 @@ class HardwareService {
 
   final LocalStorageService _storage;
   final CameraService? _fixedCamera;
+  CameraService? _filePicker;
   final ScaleService? _fixedScale;
   final ImagePipeline _pipeline;
   final DirectoryProvider _documentsDir;
@@ -77,6 +82,16 @@ class HardwareService {
   HardwareConfig get config => _storage.hardwareConfig;
 
   CameraService get camera => _camera ??= CameraService.create(config.camera);
+
+  /// 「選擇檔案」用的來源,與相機設定無關。
+  CameraService get filePicker =>
+      _filePicker ??= ImagePickerCameraService(filesOnly: true);
+
+  /// 設定的相機能真的拍照;桌面平台的 picker 只能選檔,這時不必提供兩種選擇。
+  bool get cameraAvailable {
+    final cam = camera;
+    return cam is! ImagePickerCameraService || cam.opensCamera;
+  }
 
   ScaleService get scale => _scale ??= ScaleService(
     ScaleReader.create(config.scale),
@@ -103,14 +118,19 @@ class HardwareService {
       p.join((await _imagesDir()).path, '${const Uuid().v4()}.jpg');
 
   /// 拍照 (擷取 → 縮放壓縮 → 品質檢查) 並同時讀秤。
+  /// [method] 為 [CaptureMethod.file] 時改由使用者選擇圖片檔案,後續處理相同。
   /// 使用者取消拍照時回 null。
-  Future<CaptureResult?> capture({bool readWeight = true}) async {
+  Future<CaptureResult?> capture({
+    bool readWeight = true,
+    CaptureMethod method = CaptureMethod.camera,
+  }) async {
     final weightFuture = readWeight && scale.enabled
         ? _readWeightSafely()
         : Future.value(const _WeightOutcome(null, null));
 
     final target = await _newImagePath();
-    final rawPath = await camera.capture('$target.raw');
+    final source = method == CaptureMethod.file ? filePicker : camera;
+    final rawPath = await source.capture('$target.raw');
     if (rawPath == null) {
       // 使用者取消:仍等秤結束,避免裝置握把未釋放。
       await weightFuture;
