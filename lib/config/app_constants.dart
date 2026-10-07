@@ -10,6 +10,9 @@ class AppConstants {
   static const String mealDataPath = 'api/machine/meals/';
   static const String mealRecordPath = 'api/machine/records/';
 
+  /// server 推播通道 (ARCHITECTURE.md §6.6);協定由 BASE_URL 的 http/https 對應成 ws/wss。
+  static const String machineEventsPath = 'ws/machine/';
+
   static const Duration requestTimeout = Duration(seconds: 15);
   static const Duration uploadTimeout = Duration(seconds: 60);
   static const Duration healthCheckTimeout = Duration(seconds: 5);
@@ -18,6 +21,20 @@ class AppConstants {
   static const Duration roomBedCacheTtl = Duration(hours: 1);
   static const Duration mealCacheTtl = Duration(hours: 24);
   static const Duration periodicSyncInterval = Duration(minutes: 30);
+
+  // --- 推播 (ARCHITECTURE.md §6.6) ---
+  /// 連續收到多個 data_changed (例如整批匯入住民) 時,合併成一次重抓。
+  static const Duration realtimeDebounce = Duration(milliseconds: 1500);
+
+  /// 推播斷線重連的退避:1s, 2s, 5s, 10s, 30s,之後每 60s。
+  static const List<Duration> realtimeReconnectDelays = [
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 10),
+    Duration(seconds: 30),
+    Duration(seconds: 60),
+  ];
 
   // --- 重試策略 (規格 6.2):1s, 5s, 30s, 5min, 30min,最多 5 次 ---
   static const List<Duration> retryDelays = [

@@ -15,6 +15,7 @@ import 'package:spoonfull_flutter_app/services/hardware/camera_service.dart';
 import 'package:spoonfull_flutter_app/services/hardware/hardware_service.dart';
 import 'package:spoonfull_flutter_app/services/hardware/image_pipeline.dart';
 import 'package:spoonfull_flutter_app/services/hardware/scale_service.dart';
+import 'package:spoonfull_flutter_app/services/realtime_service.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 class TestEnv {
@@ -46,6 +47,7 @@ Future<TestEnv> createTestEnv({
   CameraService? camera,
   CameraService? filePicker,
   ScaleService? scale,
+  RealtimeService? realtime,
 }) async {
   SharedPreferences.setMockInitialValues(prefs);
   sqfliteFfiInit();
@@ -62,6 +64,7 @@ Future<TestEnv> createTestEnv({
     tokens: tokens,
     api: api ?? MockApiRepository(latency: Duration.zero),
     connectivity: connectivity,
+    realtime: realtime,
     hardwareBuilder: (storage) => HardwareService(
       storage: storage,
       camera: camera ?? const MockCameraService(width: 640, height: 480),

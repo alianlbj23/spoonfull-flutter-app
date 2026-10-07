@@ -11,6 +11,7 @@ import 'error_handling_service.dart';
 import 'hardware/hardware_service.dart';
 import 'local_storage_service.dart';
 import 'offline_queue_service.dart';
+import 'realtime_service.dart';
 import 'record_service.dart';
 import 'sync_service.dart';
 
@@ -47,6 +48,7 @@ class AppServices {
     ApiRepository? api,
     ConnectivityService? connectivity,
     HardwareService Function(LocalStorageService storage)? hardwareBuilder,
+    RealtimeService? realtime,
   }) async {
     final db = database ?? await AppDatabase.open();
     final storage = LocalStorageService(
@@ -73,6 +75,15 @@ class AppServices {
                 ),
               ));
     pairing = DevicePairingService(repo, storage);
+    // 推播通道只對真正的 HTTP 後端有意義;Mock API 或測試注入的 API 沒有。
+    final push =
+        realtime ??
+        (api == null && !AppConfig.useMockApi
+            ? RealtimeService(
+                baseUrlProvider: () => storage.serverSettings.baseUrl,
+                tokenProvider: () => pairing.currentToken(),
+              )
+            : null);
 
     final conn = connectivity ?? PlusConnectivityService();
     final queue = OfflineQueueService(storage);
@@ -94,6 +105,7 @@ class AppServices {
       connectivity: conn,
       errors: errors,
       isPaired: pairing.hasValidToken,
+      realtime: push,
     );
     return AppServices._(
       storage: storage,

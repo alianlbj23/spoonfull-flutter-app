@@ -101,9 +101,10 @@
 |---|---|
 | `POST api/machine/pair/` | 新增 `Device` 表。配對碼由 Super Admin 在網頁產生：6 位數、10 分鐘內有效、一次性。成功後發給該機台專屬 token（存雜湊值）。可重複配對（換新 token）。 |
 | `GET api/machine/rooms/` | `LTCPatient.room_number` 去重 |
-| `GET api/machine/beds/` | `LTCPatient`：`bed_id = "{room}-{bed}"`，`patient_id = LTCPatient.id` |
+| `GET api/machine/beds/` | `LTCPatient`：`bed_id = "{room}-{bed}"`，`patient_id = LTCPatient.id`。選填 `?room_id=` 只回該房 |
 | `GET api/machine/meals/` | **當天**的菜色：循環模式依 `day_cycle`，開放模式依 `serve_date`。時段來自 `SystemSettings.lunch_*/dinner_*` |
 | `POST api/machine/records/` | 建立 `FoodIntake`，見 §6.4 |
+| `WS ws/machine/` | 推播：`LTCPatient` / `SystemSettings` / `Meal` 一變動，server 送 `data_changed`，機台立刻重抓（README §4.7；server 端 `devices/consumers.py`、`devices/events.py`） |
 
 所有回應用 `{ "success": true, "data": {...} }` / `{ "success": false, "error": { "code", "message" } }`。`error.message` 會直接顯示在機台螢幕，用中文。
 

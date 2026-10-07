@@ -71,6 +71,7 @@ class DeviceState extends ChangeNotifier {
         previous.port != settings.port ||
         previous.placeId != settings.placeId;
     if (changed && isPaired) {
+      await _services.sync.setPaired(false);
       await _services.pairing.unpair();
       await _services.storage.clearCache();
       status = PairingStatus.notPaired;
@@ -90,6 +91,7 @@ class DeviceState extends ChangeNotifier {
       notifyListeners();
       unawaited(checkServer());
       unawaited(_services.sync.syncAll(forceCache: true));
+      unawaited(_services.sync.setPaired(true));
       return true;
     } on Object catch (e) {
       pairingError = _services.errors.userMessage(e);
@@ -100,6 +102,7 @@ class DeviceState extends ChangeNotifier {
   }
 
   Future<void> unpair() async {
+    await _services.sync.setPaired(false);
     await _services.pairing.unpair();
     status = PairingStatus.notPaired;
     notifyListeners();

@@ -12,6 +12,7 @@ import 'connectivity_service.dart';
 import 'error_handling_service.dart';
 import 'local_storage_service.dart';
 import 'offline_queue_service.dart';
+import 'realtime_service.dart';
 import 'record_service.dart';
 
 class SyncSnapshot {
@@ -22,6 +23,7 @@ class SyncSnapshot {
     required this.failedCount,
     this.lastSync,
     this.lastError,
+    this.realtimeConnected = false,
   });
 
   final bool isOnline;
@@ -30,19 +32,33 @@ class SyncSnapshot {
   final int failedCount;
   final int? lastSync;
   final String? lastError;
+
+  /// server 推播通道是否連著 (ARCHITECTURE.md §6.6)。
+  final bool realtimeConnected;
 }
 
-/// 背景同步 (規格 7.2、7.3):網路恢復、定時、手動觸發時處理離線佇列與更新快取。
+/// 背景同步 (規格 7.2、7.3):網路恢復、定時、手動觸發時處理離線佇列與更新快取;
+/// 另外接 server 推播 (ARCHITECTURE.md §6.6),資料一變動就立刻重抓。
 class SyncService {
   SyncService({
-    required this._api,
-    required this._storage,
-    required this._queue,
-    required this._records,
-    required this._connectivity,
-    required this._errors,
-    required this._isPaired,
-  });
+    required ApiRepository api,
+    required LocalStorageService storage,
+    required OfflineQueueService queue,
+    required RecordService records,
+    required ConnectivityService connectivity,
+    required ErrorHandlingService errors,
+    required Future<bool> Function() isPaired,
+    RealtimeService? realtime,
+  }) : _api = api,
+       _storage = storage,
+       _queue = queue,
+       _records = records,
+       _connectivity = connectivity,
+       _errors = errors,
+       _isPaired = isPaired,
+       _realtime = realtime {
+    _realtime?.onUnauthorized = _errors.notifyUnauthorized;
+  }
 
   final ApiRepository _api;
   final LocalStorageService _storage;
@@ -51,19 +67,25 @@ class SyncService {
   final ConnectivityService _connectivity;
   final ErrorHandlingService _errors;
   final Future<bool> Function() _isPaired;
+  final RealtimeService? _realtime;
 
   final _snapshots = StreamController<SyncSnapshot>.broadcast();
   Stream<SyncSnapshot> get snapshots => _snapshots.stream;
 
   StreamSubscription<bool>? _connSub;
+  StreamSubscription<DataChangedEvent>? _eventSub;
+  StreamSubscription<bool>? _realtimeConnSub;
   Timer? _periodic;
   Timer? _retryTimer;
+  Timer? _debounce;
+  final Set<String> _pendingDatasets = {};
   bool _online = true;
   bool _syncing = false;
   bool _queueRunning = false;
   String? _lastError;
 
   bool get isOnline => _online;
+  bool get realtimeConnected => _realtime?.isConnected ?? false;
 
   Future<void> start() async {
     await _queue.recoverStuckItems();
@@ -73,7 +95,29 @@ class SyncService {
       AppConstants.periodicSyncInterval,
       (_) => syncAll(forceCache: true),
     );
+    final realtime = _realtime;
+    if (realtime != null) {
+      _eventSub = realtime.events.listen(_onDataChanged);
+      _realtimeConnSub = realtime.connectionChanges.listen(
+        _onRealtimeConnection,
+      );
+      if (await _isPaired()) realtime.start();
+    }
     await _emit();
+  }
+
+  /// 配對狀態改變:已配對就維持推播連線,解除配對就關掉。
+  Future<void> setPaired(bool paired) async {
+    final realtime = _realtime;
+    if (realtime == null) return;
+    if (paired) {
+      realtime.start();
+    } else {
+      _debounce?.cancel();
+      _debounce = null;
+      _pendingDatasets.clear();
+      await realtime.stop();
+    }
   }
 
   Future<void> _onConnectivity(bool online) async {
@@ -82,8 +126,28 @@ class SyncService {
     await _emit();
     if (restored) {
       Log.i('network restored, syncing');
+      _realtime?.retryNow();
       await syncAll();
     }
+  }
+
+  /// server 推播:合併 [AppConstants.realtimeDebounce] 內的事件後只重抓列出的資料。
+  void _onDataChanged(DataChangedEvent event) {
+    _pendingDatasets.addAll(event.datasets);
+    _debounce?.cancel();
+    _debounce = Timer(AppConstants.realtimeDebounce, () {
+      _debounce = null;
+      final datasets = Set<String>.of(_pendingDatasets);
+      _pendingDatasets.clear();
+      Log.i('realtime: ${datasets.join(', ')} changed, refreshing');
+      unawaited(refreshCache(force: true, datasets: datasets));
+    });
+  }
+
+  /// 推播連上時一律全量重抓,補上斷線 (或啟動到連上之間) 錯過的變動。
+  Future<void> _onRealtimeConnection(bool connected) async {
+    await _emit();
+    if (connected) await refreshCache(force: true);
   }
 
   /// 完整同步:更新快取 + 處理佇列。
@@ -94,15 +158,21 @@ class SyncService {
   }
 
   /// 依快取有效期更新病房/床位/膳食資料。
-  Future<void> refreshCache({bool force = false}) async {
+  ///
+  /// [datasets] 限定只更新 [LocalStorageService.datasetRooms] /
+  /// [LocalStorageService.datasetBeds] / [LocalStorageService.datasetMeals]
+  /// 之中列出的;null 代表全部。
+  Future<void> refreshCache({bool force = false, Set<String>? datasets}) async {
     if (!_online || !await _isPaired()) return;
+    bool wants(String dataset) => datasets == null || datasets.contains(dataset);
     final placeId = _storage.serverSettings.placeId;
     final now = nowUnix();
     _syncing = true;
     await _emit();
     try {
       final roomsTs = _storage.lastUpdated(LocalStorageService.datasetRooms);
-      if (force || _stale(roomsTs, AppConstants.roomBedCacheTtl, now)) {
+      if (wants(LocalStorageService.datasetRooms) &&
+          (force || _stale(roomsTs, AppConstants.roomBedCacheTtl, now))) {
         final res = await _api.fetchRooms(
           placeId: placeId,
           lastUpdated: force ? null : roomsTs,
@@ -118,7 +188,8 @@ class SyncService {
         );
       }
       final bedsTs = _storage.lastUpdated(LocalStorageService.datasetBeds);
-      if (force || _stale(bedsTs, AppConstants.roomBedCacheTtl, now)) {
+      if (wants(LocalStorageService.datasetBeds) &&
+          (force || _stale(bedsTs, AppConstants.roomBedCacheTtl, now))) {
         final res = await _api.fetchBeds(
           placeId: placeId,
           lastUpdated: force ? null : bedsTs,
@@ -134,7 +205,8 @@ class SyncService {
         );
       }
       final mealsTs = _storage.lastUpdated(LocalStorageService.datasetMeals);
-      if (force || _stale(mealsTs, AppConstants.mealCacheTtl, now)) {
+      if (wants(LocalStorageService.datasetMeals) &&
+          (force || _stale(mealsTs, AppConstants.mealCacheTtl, now))) {
         final res = await _api.fetchMeals(placeId: placeId);
         await _storage.saveMeals(placeId, res.meals, res.timeSlots);
         await _storage.setLastUpdated(
@@ -238,6 +310,7 @@ class SyncService {
         failedCount: failed,
         lastSync: _storage.deviceConfig.lastSync,
         lastError: _lastError,
+        realtimeConnected: realtimeConnected,
       ),
     );
   }
@@ -246,8 +319,12 @@ class SyncService {
 
   Future<void> dispose() async {
     await _connSub?.cancel();
+    await _eventSub?.cancel();
+    await _realtimeConnSub?.cancel();
     _periodic?.cancel();
     _retryTimer?.cancel();
+    _debounce?.cancel();
+    await _realtime?.dispose();
     await _snapshots.close();
   }
 }

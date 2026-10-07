@@ -71,7 +71,8 @@ main()
      ├─ SyncService.start()
      │   ├─ 將上次異常中斷而卡在 processing 的佇列項目改回 pending
      │   ├─ 監聽網路狀態 (斷線 → 恢復時自動同步)
-     │   └─ 每 30 分鐘強制完整同步一次
+     │   ├─ 每 30 分鐘強制完整同步一次
+     │   └─ 若已配對 → 連上推播 ws/machine/ (server 資料一變動就重抓,§4.7)
      ├─ ping 伺服器 (GET BASE_URL,歡迎畫面「伺服器」燈號)
      └─ 若已配對 → syncAll():更新快取 + 上傳離線佇列
 ```
@@ -107,9 +108,11 @@ main()
 |---|---|
 | 啟動、儲存設定、配對成功後 | `GET /`(ping,只要有任何 HTTP 回應就算可連線,5 秒逾時) |
 | 配對 | `POST api/machine/pair/` |
-| 配對成功後 | 三個查詢 API 全部重抓(不帶 `last_updated`) |
+| 配對成功後 | 三個查詢 API 全部重抓(不帶 `last_updated`),並建立推播連線 `ws/machine/` |
+| 推播連線建立(含斷線重連) | 三個查詢 API 全部重抓,補上斷線期間錯過的變動 |
+| 收到推播 `data_changed` | 只重抓事件列出的資料(1.5 秒內的多個事件合併成一次),見 §4.7 |
 | 啟動、網路恢復時 | 查詢 API:病房/床位超過 1 小時、膳食超過 24 小時才重抓 |
-| 每 30 分鐘 | 三個查詢 API 全部重抓 |
+| 每 30 分鐘 | 三個查詢 API 全部重抓(推播的最後保險) |
 | 按下上傳 | `POST api/machine/records/`(離線則先進佇列) |
 | 佇列重試到期 | `POST api/machine/records/` |
 
@@ -232,7 +235,7 @@ main()
 
 ### 4.3 `GET api/machine/beds/` — 床位與病患
 
-查詢參數:`place_id`、`last_updated`(選填)。機台目前**不會**帶 `room_id`,而是一次抓整個場域。
+查詢參數:`place_id`、`last_updated`、`room_id`(皆選填)。`room_id` 是 `rooms` 回的 `room_id`,帶了就只回該病房的床位;機台目前**不會**帶,而是一次抓整個場域後在本機分組。
 
 ```json
 {
@@ -286,7 +289,7 @@ main()
 - 機台保存上一次回應裡的 `data.timestamp`,下次請求時當成 `last_updated` 帶回來
 - **有帶** `last_updated` 且本機已有快取:機台以 `bed_id` / `room_id` 為 key **合併(upsert)**回傳的資料,所以接收器可以只回有變動的資料
 - **沒帶** `last_updated`(第一次、配對後、每 30 分鐘):機台**整批取代**快取,所以接收器必須回全部資料
-- 接收器也可以忽略 `last_updated` 一律回全量,這樣最簡單也正確。但要注意:增量模式下機台不會刪除資料,已刪除的病房/床位要等下一次全量同步(最多 30 分鐘)才會消失
+- 接收器也可以忽略 `last_updated` 一律回全量,這樣最簡單也正確。但要注意:增量模式下機台不會刪除資料,已刪除的病房/床位要等下一次全量同步才會消失(推播連上時或每 30 分鐘;收到 `data_changed` 的重抓也是全量取代)
 - `timestamp` 請用**伺服器時間**,不要用資料的最大 `updated_at`,以免漏掉同一秒內的變動
 
 ### 4.6 `POST api/machine/records/` — 上傳膳食紀錄(主要輸出)
@@ -369,6 +372,22 @@ main()
 如果接收器已經存檔,但回應在 60 秒內沒送回機台(逾時、斷線),機台會重送同一筆資料。請以 **`client_record_id`**(每筆紀錄唯一的 UUID,`FoodIntake.client_record_id` unique)判斷是否重複;遇到重複時**回傳原本那筆的 `record_id` 與成功回應**,不要回錯誤,也不要新增一筆。
 
 > 舊版 App(沒有 `client_record_id`)可退回用 `(device_id, bed_id, meal_id, meal_time_slot, before_after, capture_time)` 判斷。
+
+### 4.7 `WS ws/machine/` — 推播:資料一變動就通知機台
+
+病房、床位、用餐時段在機台上都是快取。為了讓 server 端改了住民房號或用膳時間後**立即**反映在機台,已配對的機台會另外保持一條 WebSocket;server 一有變動就推一則事件,機台收到後馬上重抓對應的查詢 API。沒有這條連線機台也能用(退回 30 分鐘定時同步),所以接收器可以選擇不實作。
+
+- **位址**:`BASE_URL` 的 `http`/`https` 對應成 `ws`/`wss`,路徑 `ws/machine/`。例如 `http://192.168.0.10:8000/` → `ws://192.168.0.10:8000/ws/machine/`
+- **認證**:與 REST 相同,`Authorization: Bearer <device_token>` header。token 無效或機台被停用時,server **先接受再以 close code 4401 關閉**;機台視同 REST 401:清除 token、停止重連、回到配對畫面
+- **server → 機台**(JSON 文字訊息):
+  - 連上後先收 `{ "event": "connected", "device_id": "...", "machine_id": 1, "server_time": "..." }`
+  - 之後每次變動收 `{ "event": "data_changed", "datasets": ["rooms", "beds"], "timestamp": 1726900123 }`,`datasets` 是 `rooms` / `beds` / `meals` 的子集:住民新增、修改、刪除 → `rooms` + `beds`;用膳時段或菜單變動 → `meals`
+- **機台 → server**:可送 `{ "type": "ping" }`,server 回 `{ "event": "pong" }`(選用;目前機台不主動送)
+- **機台行為**(`lib/services/realtime_service.dart`、`sync_service.dart`):
+  - 收到 `data_changed` 後合併 1.5 秒內的所有事件,只對列出的 dataset 做一次重抓(不帶 `last_updated`,整批取代快取),畫面隨即更新
+  - 連線建立時(第一次或重連)一律三個查詢 API 全部重抓,補上斷線期間錯過的變動
+  - 斷線以 1、2、5、10、30 秒退避重連,之後每 60 秒;網路恢復時立即重試
+  - 解除配對或 4401 時關閉連線
 
 ---
 
