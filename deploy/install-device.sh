@@ -59,6 +59,8 @@ mkdir -p "$INSTALL_DIR"
 if [[ ! -x "$INSTALL_DIR/spoonfull_flutter_app" ]]; then
   echo "   注意:$INSTALL_DIR 裡還沒有 App。請把 build/linux/<arch>/release/bundle/* 複製進去。"
 fi
+# App 以 $APP_USER 執行,自動更新要能替換這個資料夾裡的檔案 (lib/services/update_service.dart)
+chown -R "$APP_USER" "$INSTALL_DIR"
 sed "s/__USER__/$APP_USER/g" "$HERE/spoonfull-kiosk.service" > /etc/systemd/system/spoonfull-kiosk.service
 systemctl daemon-reload
 systemctl enable spoonfull-kiosk.service

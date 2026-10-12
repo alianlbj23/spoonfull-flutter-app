@@ -104,6 +104,19 @@ class AppConstants {
   /// 低於此重量視為秤上沒有餐盒。
   static const double scaleEmptyThresholdG = 5.0;
 
+  // --- 自動更新 (lib/services/update_service.dart) ---
+  static const Duration updateCheckInterval = Duration(minutes: 10);
+  static const Duration updateDownloadTimeout = Duration(minutes: 10);
+
+  /// 使用者這段時間沒有碰螢幕才安裝更新並重新啟動。
+  static const Duration updateIdleBeforeRestart = Duration(seconds: 60);
+
+  /// 更新已下載但 App 正在使用時,多久後再看一次是否閒置。
+  static const Duration updateIdleRetry = Duration(seconds: 15);
+
+  /// 重新啟動前顯示「正在更新」提示的時間。
+  static const Duration updateInstallNotice = Duration(seconds: 3);
+
   static const int pairingCodeLength = 6;
 
   /// Figma 設計稿的畫布大小 (機台觸控螢幕 1024x600)。

@@ -8,6 +8,10 @@
 #
 # 每次 push 到 main 都會更新同一個 Release (tag `latest`),只保留最新版,下載網址固定:
 #   https://github.com/<owner>/<repo>/releases/latest/download/<檔名>
+#
+# 自動更新 (lib/services/update_service.dart):run number 會編進 App (APP_BUILD),
+# Release 另外放一份 version.json (最新的 run number 與各檔案的 SHA-256)。
+# 已安裝的 App 讀到較大的 build 就下載對應平台的檔案、替換並重新啟動。
 name: Build
 
 on:
@@ -48,7 +52,9 @@ jobs:
         run: |
           flutter config --enable-linux-desktop --no-analytics
           flutter pub get
-          flutter build linux --release
+          flutter build linux --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=APP_BUILD=${{ github.run_number }}
 
       # 用 tar 打包,保留執行檔權限 (artifact 的 zip 會弄丟 +x)
       - name: Package bundle
@@ -75,7 +81,7 @@ jobs:
         run: |
           flutter config --enable-windows-desktop --no-analytics
           flutter pub get
-          flutter build windows --release
+          flutter build windows --release --build-number=${{ github.run_number }} --dart-define=APP_BUILD=${{ github.run_number }}
 
       # 一併放入 VC++ runtime,沒裝 Visual C++ Redistributable 的電腦也能直接執行
       - name: Package
@@ -130,3 +136,23 @@ jobs:
             spoonfull-linux-arm64.tar.gz
             spoonfull-linux-x64.tar.gz
             spoonfull-windows-x64.zip
+
+      # version.json 最後才換:安裝檔都到位後,已安裝的 App 才會看到新版
+      - name: Publish version.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha() { sha256sum "$1" | cut -d' ' -f1; }
+          cat > version.json <<EOF
+          {
+            "build": ${{ github.run_number }},
+            "commit": "${{ github.sha }}",
+            "assets": {
+              "linux-arm64": {"file": "spoonfull-linux-arm64.tar.gz", "sha256": "$(sha spoonfull-linux-arm64.tar.gz)"},
+              "linux-x64": {"file": "spoonfull-linux-x64.tar.gz", "sha256": "$(sha spoonfull-linux-x64.tar.gz)"},
+              "windows-x64": {"file": "spoonfull-windows-x64.zip", "sha256": "$(sha spoonfull-windows-x64.zip)"}
+            }
+          }
+          EOF
+          python3 -m json.tool version.json
+          gh release upload latest version.json --clobber

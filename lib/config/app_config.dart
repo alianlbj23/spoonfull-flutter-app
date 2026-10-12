@@ -24,6 +24,17 @@ class AppConfig {
 
   static bool get hasAutoPairingCode => autoPairingCode.isNotEmpty;
 
+  /// CI 編譯時帶入的遞增版本編號 (`--dart-define=APP_BUILD=<run number>`)。
+  /// 本機編譯為 0,這時不會自動更新。
+  static const int buildNumber = int.fromEnvironment('APP_BUILD');
+
+  /// 自動更新的下載位置:底下要有 `version.json` 與各平台的安裝檔。
+  static const String updateBaseUrl = String.fromEnvironment(
+    'UPDATE_BASE_URL',
+    defaultValue:
+        'https://github.com/alianlbj23/spoonfull-flutter-app/releases/latest/download/',
+  );
+
   static AppEnvironment get environment => switch (_envName) {
     'prod' => AppEnvironment.prod,
     'test' => AppEnvironment.test,

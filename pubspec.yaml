@@ -51,6 +51,7 @@ dependencies:
   intl: ^0.20.3
   http_parser: ^4.1.2
   image: ^4.10.1
+  crypto: ^3.0.7
 dev_dependencies:
   flutter_test:
     sdk: flutter

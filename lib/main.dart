@@ -12,5 +12,9 @@ Future<void> main() async {
     DeviceOrientation.landscapeRight,
   ]);
   final services = await AppServices.create();
+  // 自動更新:有新版時在閒置狀態下替換檔案並重新啟動 (services/update_service.dart)
+  services.updates
+    ..onBeforeRestart = services.dispose
+    ..start();
   runApp(SpoonfullApp(services: services));
 }

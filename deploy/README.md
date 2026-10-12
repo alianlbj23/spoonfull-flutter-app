@@ -63,7 +63,19 @@ sudo ./deploy/install-device.sh --user <登入帳號> [--hx711]
 3. server 端確認 `FoodIntake` 有 `weight_g`、`client_record_id`、`captured_at`,`edge_result` 有 `quality_check`。
 4. 拔網路線上傳一筆 → 顯示離線排隊;插回去自動送出,server 只會有一筆 (去重鍵 `client_record_id`)。
 
-## 5. 常見問題
+## 5. 自動更新
+
+每次 push 到 `main`,GitHub Actions 會編譯三個平台並更新同一個 Release (`latest`),同時放一份 `version.json`。已安裝的 App 會在**啟動時、網路恢復時、以及每 10 分鐘**讀一次 `version.json`,發現較新的版本就下載、驗證 SHA-256、替換安裝資料夾裡的檔案,然後重新啟動 ([lib/services/update_service.dart](../lib/services/update_service.dart))。
+
+- **不會打斷操作**:拍照或上傳中不安裝;使用者 60 秒內碰過螢幕也先不安裝。剛啟動時視為閒置,會馬上更新。安裝前畫面會顯示「正在更新到最新版本」約 3 秒。
+- **只有 GitHub 編譯的版本會自動更新**。本機 `flutter build` / `flutter run` 的版本編號是 0,不會更新自己。所以每台機器**第一次**要手動安裝一份從 Release 下載的版本,之後才會自己更新。
+- **安裝資料夾要可寫入**:機台由 `install-device.sh` 把 `/opt/spoonfull` 的擁有者改成執行 App 的帳號。Windows / Ubuntu 桌機請解壓縮到使用者自己的資料夾 (不要放 `C:\Program Files`)。
+- **機台要連得到 `github.com`**。醫院網路若有防火牆,需要放行 `github.com` 與 `objects.githubusercontent.com`,否則只是不會更新,App 照常運作。
+- **repo 必須是 public**,App 才讀得到 Release。
+- 看 log:`journalctl -u spoonfull-kiosk | grep -i update`。`auto-update off: ... is not writable` 表示安裝資料夾權限不對,重跑一次 `install-device.sh`。
+- 更新來源可在編譯時用 `--dart-define=UPDATE_BASE_URL=https://.../` 改成自己的伺服器 (底下要有 `version.json` 與安裝檔)。
+
+## 6. 常見問題
 
 - **App 啟動後配對狀態每次都消失**:kiosk 沒有 keyring,App 會自動改用 `~/.local/share/.../auth_token.json` (權限 600)。看 log 有 `using file storage` 即正常。
 - **相機第一張很暗**:自動曝光還沒收斂。硬體設定沒有暴露暖機張數,預設連拍 9 張取最後一張;若仍暗,補光燈常亮,或在 `CameraSettings.warmupFrames` 調大。

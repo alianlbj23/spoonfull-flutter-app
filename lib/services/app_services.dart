@@ -14,6 +14,7 @@ import 'offline_queue_service.dart';
 import 'realtime_service.dart';
 import 'record_service.dart';
 import 'sync_service.dart';
+import 'update_service.dart';
 
 /// 依賴組裝 (Composition Root)。
 class AppServices {
@@ -27,6 +28,7 @@ class AppServices {
     required this.hardware,
     required this.records,
     required this.sync,
+    required this.updates,
     required this.database,
   });
 
@@ -39,6 +41,7 @@ class AppServices {
   final HardwareService hardware;
   final RecordService records;
   final SyncService sync;
+  final UpdateService updates;
   final AppDatabase database;
 
   static Future<AppServices> create({
@@ -117,11 +120,13 @@ class AppServices {
       hardware: hardware,
       records: records,
       sync: sync,
+      updates: UpdateService(connectivity: conn),
       database: db,
     );
   }
 
   Future<void> dispose() async {
+    await updates.dispose();
     await sync.dispose();
     await hardware.dispose();
     errors.dispose();
