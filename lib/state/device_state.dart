@@ -3,7 +3,10 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../config/app_config.dart';
+import '../config/app_constants.dart';
+import '../core/errors/app_exception.dart';
 import '../core/utils/logger.dart';
+import '../data/models/api_models.dart';
 import '../data/models/device_config.dart';
 import '../services/app_services.dart';
 
@@ -25,6 +28,23 @@ class DeviceState extends ChangeNotifier {
   bool serverReachable = false;
   bool databaseReady = false;
   String? pairingError;
+
+  /// 最近一次健康檢查結果 (含 server 時間)。
+  ServerHealth? serverHealth;
+
+  /// 機台時鐘與 server 差太多時的警告 (中文);正常時為 null。
+  String? get clockSkewWarning => serverHealth?.clockSkewWarning;
+
+  /// 配對被限流 (THROTTLED) 時,這個時間之前不能再按配對。
+  DateTime? pairingBlockedUntil;
+
+  /// 還要等多久才能再配對;沒有限制時為 null。
+  Duration? pairingCooldown([DateTime? now]) {
+    final until = pairingBlockedUntil;
+    if (until == null) return null;
+    final left = until.difference(now ?? DateTime.now());
+    return left > Duration.zero ? left : null;
+  }
 
   /// 因 401 被強制解除配對時的提示,UI 顯示後清除。
   String? forcedLogoutMessage;
@@ -71,8 +91,20 @@ class DeviceState extends ChangeNotifier {
     return pair(AppConfig.autoPairingCode);
   }
 
+  /// 測試連線:呼叫 `api/machine/health/` (舊版 server 退回舊做法),
+  /// 順便檢查機台時鐘。
   Future<void> checkServer() async {
-    serverReachable = isConfigured && await _services.api.ping();
+    if (!isConfigured) {
+      serverReachable = false;
+      serverHealth = null;
+      notifyListeners();
+      return;
+    }
+    final health = await _services.api.checkHealth();
+    serverHealth = health;
+    serverReachable = health.reachable;
+    final warning = health.clockSkewWarning;
+    if (warning != null) Log.i('clock skew warning: $warning');
     notifyListeners();
   }
 
@@ -96,19 +128,27 @@ class DeviceState extends ChangeNotifier {
   }
 
   Future<bool> pair(String code) async {
+    if (pairingCooldown() != null) return false;
     status = PairingStatus.pairing;
     pairingError = null;
     notifyListeners();
     try {
       await _services.pairing.pair(code);
       status = PairingStatus.paired;
+      pairingBlockedUntil = null;
       notifyListeners();
       unawaited(checkServer());
-      unawaited(_services.sync.syncAll(forceCache: true));
+      // 佇列裡因 401 而等待的紀錄立刻補傳,不等退避。
+      unawaited(_services.sync.afterPaired());
       unawaited(_services.sync.setPaired(true));
       return true;
     } on Object catch (e) {
-      pairingError = _services.errors.userMessage(e);
+      pairingError = _services.errors.pairingMessage(e);
+      if (e is AppException && (e.code == 'THROTTLED' || e.statusCode == 429)) {
+        pairingBlockedUntil = DateTime.now().add(
+          e.retryAfter ?? AppConstants.pairingThrottleDefault,
+        );
+      }
       status = PairingStatus.notPaired;
       notifyListeners();
       return false;

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../../core/utils/time_utils.dart';
 
 enum MealType {
@@ -26,6 +28,7 @@ class MealData {
     required this.mealName,
     required this.mealType,
     this.mealTimeSlot,
+    this.assignedPatientIds = const [],
     required this.lastUpdated,
   });
 
@@ -33,8 +36,19 @@ class MealData {
   final String mealId;
   final String mealName;
   final MealType mealType;
+
+  /// 這份膳食屬於哪個時段 (`time_slot_id`,如 `lunch`);舊版 server 沒給時為 null。
   final String? mealTimeSlot;
+
+  /// server 指派這份膳食的住民 (patient_id);用來預選該住民的餐。
+  final List<String> assignedPatientIds;
   final int lastUpdated;
+
+  bool isAssignedTo(String? patientId) =>
+      patientId != null && assignedPatientIds.contains(patientId);
+
+  static List<String> _ids(Object? value) =>
+      value is List ? [for (final v in value) '$v'] : const [];
 
   factory MealData.fromApi(Map<String, Object?> json) => MealData(
     placeId: asString(json['place_id']) ?? '',
@@ -42,6 +56,7 @@ class MealData {
     mealName: asString(json['meal_name']) ?? '',
     mealType: MealType.parse(asString(json['meal_type'])),
     mealTimeSlot: asString(json['meal_time_slot']),
+    assignedPatientIds: _ids(json['assigned_patient_ids']),
     lastUpdated: asInt(json['updated_at']) ?? nowUnix(),
   );
 
@@ -51,8 +66,18 @@ class MealData {
     mealName: row['meal_name'] as String,
     mealType: MealType.parse(row['meal_type'] as String?),
     mealTimeSlot: row['meal_time_slot'] as String?,
+    assignedPatientIds: _decodeIds(row['assigned_patient_ids'] as String?),
     lastUpdated: row['last_updated'] as int,
   );
+
+  static List<String> _decodeIds(String? raw) {
+    if (raw == null || raw.isEmpty) return const [];
+    try {
+      return _ids(jsonDecode(raw));
+    } on FormatException {
+      return const [];
+    }
+  }
 
   Map<String, Object?> toDb() => {
     'place_id': placeId,
@@ -60,6 +85,7 @@ class MealData {
     'meal_name': mealName,
     'meal_type': mealType.name,
     'meal_time_slot': mealTimeSlot,
+    'assigned_patient_ids': jsonEncode(assignedPatientIds),
     'last_updated': lastUpdated,
   };
 }

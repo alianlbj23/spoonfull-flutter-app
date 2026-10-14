@@ -156,6 +156,13 @@ class SyncService {
     if (connected) await refreshCache(force: true);
   }
 
+  /// 配對成功:佇列裡等待退避的項目 (例如 401 時留下的) 改成立刻上傳,再完整同步。
+  Future<void> afterPaired() async {
+    final n = await _queue.rescheduleAllNow();
+    if (n > 0) Log.i('paired: $n queued record(s) rescheduled');
+    await syncAll(forceCache: true);
+  }
+
   /// 完整同步:更新快取 + 處理佇列。
   Future<void> syncAll({bool forceCache = false}) async {
     if (!await _isPaired()) return;
@@ -215,7 +222,13 @@ class SyncService {
       if (wants(LocalStorageService.datasetMeals) &&
           (force || _stale(mealsTs, AppConstants.mealCacheTtl, now))) {
         final res = await _api.fetchMeals(placeId: placeId);
-        await _storage.saveMeals(placeId, res.meals, res.timeSlots);
+        await _storage.saveMeals(
+          placeId,
+          res.meals,
+          res.timeSlots,
+          currentSlot: res.currentSlot,
+          currentSlotAt: nowUnix(),
+        );
         await _storage.setLastUpdated(
           LocalStorageService.datasetMeals,
           res.timestamp,
@@ -264,6 +277,19 @@ class SyncService {
     final record = localId == null ? null : await _storage.getRecord(localId);
     if (record == null) {
       await _queue.markCompleted(item);
+      return false;
+    }
+    // 餐前照要先到 server:同一住民、同一餐、同一天的餐前還在佇列就先延後。
+    final blocker = await _queue.pendingBeforeFor(
+      item.requestData,
+      excludeQueueId: item.queueId,
+    );
+    if (blocker != null) {
+      Log.i(
+        'record $localId (after) waits for before-record '
+        '${blocker.requestData['local_id']}',
+      );
+      await _queue.defer(item, OfflineQueueService.deferredAttemptAt(blocker));
       return false;
     }
     final processing = await _queue.markProcessing(item);

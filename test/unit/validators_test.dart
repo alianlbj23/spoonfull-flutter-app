@@ -1,8 +1,11 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:spoonfull_flutter_app/core/errors/app_exception.dart';
+import 'package:spoonfull_flutter_app/core/utils/server_address.dart';
 import 'package:spoonfull_flutter_app/core/utils/validators.dart';
+import 'package:spoonfull_flutter_app/data/local/preferences_storage.dart';
 import 'package:spoonfull_flutter_app/data/models/bed_data.dart';
 import 'package:spoonfull_flutter_app/data/models/device_config.dart';
 import 'package:spoonfull_flutter_app/data/models/meal_data.dart';
@@ -51,7 +54,10 @@ void main() {
       ),
       'image/png',
     );
-    expect(Validators.detectMime(Uint8List.fromList([0x47, 0x49, 0x46])), isNull);
+    expect(
+      Validators.detectMime(Uint8List.fromList([0x47, 0x49, 0x46])),
+      isNull,
+    );
   });
 
   test('bed must belong to room and patient must match', () {
@@ -91,12 +97,18 @@ void main() {
 
   test('ServerSettings builds base URL', () {
     expect(
-      const ServerSettings(host: '10.0.0.5', port: '8080', placeId: 'A').baseUrl,
+      const ServerSettings(
+        host: '10.0.0.5',
+        port: '8080',
+        placeId: 'A',
+      ).baseUrl,
       'http://10.0.0.5:8080/',
     );
     expect(
-      const ServerSettings(host: 'https://api.example.com/', port: '443')
-          .baseUrl,
+      const ServerSettings(
+        host: 'https://api.example.com/',
+        port: '443',
+      ).baseUrl,
       'https://api.example.com/',
     );
     expect(const ServerSettings(host: '').baseUrl, isNull);
@@ -117,5 +129,142 @@ void main() {
     expect(slot('11:30').inferredMealType, MealType.lunch);
     expect(slot('17:00').inferredMealType, MealType.dinner);
     expect(slot('21:30').inferredMealType, MealType.snack);
+  });
+
+  group('ServerAddress', () {
+    String? url(String input, [String port = '']) =>
+        ServerAddress.resolve(input, port: port).baseUrl;
+    String? error(String input, [String port = '']) =>
+        ServerAddress.resolve(input, port: port).error;
+
+    test('full URLs keep scheme, default the port, add a trailing slash', () {
+      expect(
+        url('https://foodintakesystem.com'),
+        'https://foodintakesystem.com/',
+      );
+      expect(
+        url('  https://foodintakesystem.com/  '),
+        'https://foodintakesystem.com/',
+      );
+      expect(url('http://192.168.1.10:8000'), 'http://192.168.1.10:8000/');
+      expect(url('https://example.org/app'), 'https://example.org/app/');
+    });
+
+    test('bare host: LAN → http, public → https', () {
+      expect(url('192.168.1.10'), 'http://192.168.1.10/');
+      expect(url('10.0.0.5', '8080'), 'http://10.0.0.5:8080/');
+      expect(url('172.20.1.1:8000'), 'http://172.20.1.1:8000/');
+      expect(url('localhost:8000'), 'http://localhost:8000/');
+      expect(url('spoon-server.local'), 'http://spoon-server.local/');
+      expect(url('foodintakesystem.com'), 'https://foodintakesystem.com/');
+      expect(url('8.8.8.8'), 'https://8.8.8.8/');
+      expect(url('172.32.0.1'), 'https://172.32.0.1/', reason: '不在 172.16/12');
+    });
+
+    test('port field is used only when the URL has none', () {
+      expect(url('https://example.org', '8443'), 'https://example.org:8443/');
+      expect(url('http://10.0.0.5:8000', '9000'), 'http://10.0.0.5:8000/');
+      expect(error('10.0.0.5', '70000'), isNotNull);
+      expect(error('10.0.0.5', 'abc'), isNotNull);
+    });
+
+    test('http to a public host is rejected with a Chinese message', () {
+      final r = ServerAddress.resolve('http://foodintakesystem.com');
+      expect(r.isValid, isFalse);
+      expect(r.error, contains('https://'));
+      expect(
+        ServerAddress.resolve(
+          'http://foodintakesystem.com',
+          allowInsecurePublic: true,
+        ).baseUrl,
+        'http://foodintakesystem.com/',
+      );
+      expect(ServerAddress.resolve('http://192.168.0.2').isValid, isTrue);
+    });
+
+    test('garbage and unsupported schemes are rejected', () {
+      expect(error(''), isNotNull);
+      expect(error('ftp://example.org'), isNotNull);
+      expect(error('http://'), isNotNull);
+    });
+
+    test('private host detection', () {
+      for (final h in [
+        '10.1.2.3',
+        '192.168.0.1',
+        '127.0.0.1',
+        '::1',
+        'fd00::1',
+        '[fe80::1]',
+        'localhost',
+        'nas',
+        'pi.local',
+      ]) {
+        expect(ServerAddress.isPrivateHost(h), isTrue, reason: h);
+      }
+      for (final h in ['1.1.1.1', 'foodintakesystem.com', '2001:db8::1']) {
+        expect(ServerAddress.isPrivateHost(h), isFalse, reason: h);
+      }
+    });
+
+    test('ServerSettings is complete without a port', () {
+      const s = ServerSettings(
+        host: 'https://foodintakesystem.com',
+        placeId: 'A',
+      );
+      expect(s.isComplete, isTrue);
+      expect(s.baseUrl, 'https://foodintakesystem.com/');
+    });
+  });
+
+  group('stored server settings migration', () {
+    Future<PreferencesStorage> prefs(Map<String, Object> values) async {
+      SharedPreferences.setMockInitialValues(values);
+      return PreferencesStorage(await SharedPreferences.getInstance());
+    }
+
+    test('old host + port keeps connecting to the same http URL', () async {
+      final p = await prefs({
+        'server.host': 'myserver.example.com',
+        'server.port': '8000',
+        'device_config.location': 'A',
+      });
+      final s = p.readServerSettings();
+      expect(
+        s.baseUrl,
+        'http://myserver.example.com:8000/',
+        reason: '舊版沒寫協定一律 http,升級後不能變成 https',
+      );
+      expect(s.port, '');
+      expect(s.isComplete, isTrue);
+      // 已轉成新格式,再讀一次結果相同。
+      expect(
+        p.readServerSettings().baseUrl,
+        'http://myserver.example.com:8000/',
+      );
+    });
+
+    test('old https form and LAN form keep working', () async {
+      final p1 = await prefs({
+        'server.host': 'https://api.example.com/',
+        'server.port': '8443',
+      });
+      expect(p1.readServerSettings().baseUrl, 'https://api.example.com:8443/');
+      final p2 = await prefs({
+        'server.host': '192.168.0.10',
+        'server.port': '8080',
+      });
+      expect(p2.readServerSettings().baseUrl, 'http://192.168.0.10:8080/');
+    });
+
+    test('new-format settings are not rewritten', () async {
+      final p = await prefs({});
+      await p.writeServerSettings(
+        const ServerSettings(host: 'foodintakesystem.com', placeId: 'A'),
+      );
+      final s = p.readServerSettings();
+      expect(s.host, 'foodintakesystem.com');
+      expect(s.baseUrl, 'https://foodintakesystem.com/');
+    });
   });
 }

@@ -56,7 +56,14 @@ class LocalMealRecord {
     required this.createdAt,
     required this.updatedAt,
     this.errorMessage,
+    this.serverFlags = const [],
   });
+
+  /// server 回應的 `bed_mismatch`。
+  static const flagBedMismatch = 'bed_mismatch';
+
+  /// server 回應的 `assignment_mismatch`。
+  static const flagAssignmentMismatch = 'assignment_mismatch';
 
   final String localId;
 
@@ -86,6 +93,12 @@ class LocalMealRecord {
   /// 最近一次上傳失敗原因 (僅本機顯示用)。
   final String? errorMessage;
 
+  /// 上傳成功後 server 標記的問題 ([flagBedMismatch] / [flagAssignmentMismatch])。
+  final List<String> serverFlags;
+
+  bool get bedMismatch => serverFlags.contains(flagBedMismatch);
+  bool get assignmentMismatch => serverFlags.contains(flagAssignmentMismatch);
+
   LocalMealRecord copyWith({
     String? recordId,
     double? weightG,
@@ -98,6 +111,7 @@ class LocalMealRecord {
     int? updatedAt,
     String? errorMessage,
     bool clearError = false,
+    List<String>? serverFlags,
   }) {
     return LocalMealRecord(
       localId: localId,
@@ -121,12 +135,14 @@ class LocalMealRecord {
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
+      serverFlags: serverFlags ?? this.serverFlags,
     );
   }
 
   factory LocalMealRecord.fromDb(Map<String, Object?> row) {
     final ai = row['ai_result'] as String?;
     final edge = row['edge_result'] as String?;
+    final flags = row['server_flags'] as String?;
     return LocalMealRecord(
       localId: row['local_id'] as String,
       recordId: row['record_id'] as String?,
@@ -153,6 +169,9 @@ class LocalMealRecord {
       createdAt: row['created_at'] as int,
       updatedAt: row['updated_at'] as int,
       errorMessage: row['error_message'] as String?,
+      serverFlags: flags == null || flags.isEmpty
+          ? const []
+          : flags.split(',').where((f) => f.isNotEmpty).toList(),
     );
   }
 
@@ -176,5 +195,6 @@ class LocalMealRecord {
     'created_at': createdAt,
     'updated_at': updatedAt,
     'error_message': errorMessage,
+    'server_flags': serverFlags.isEmpty ? null : serverFlags.join(','),
   };
 }

@@ -32,6 +32,7 @@ class CaptureResult {
     required this.quality,
     this.weight,
     this.weightError,
+    this.capturedAt,
   });
 
   final String imagePath;
@@ -44,6 +45,9 @@ class CaptureResult {
 
   /// 秤讀取失敗的原因 (裝置不存在等),顯示給操作者。
   final String? weightError;
+
+  /// 快門時間 (相機拍到 / 使用者選好檔案的那一刻),上傳時當 capture_time。
+  final DateTime? capturedAt;
 
   /// 秤上幾乎沒有重量 → 多半是餐盒沒放上去。
   bool get scaleLooksEmpty =>
@@ -156,6 +160,8 @@ class HardwareService {
       await weightFuture;
       return null;
     }
+    // 快門時間:擷取完成的那一刻,不是之後壓縮、品質檢查或使用者按上傳的時間。
+    final capturedAt = DateTime.now();
     final processed = await _pipeline.process(
       sourcePath: rawPath,
       outputPath: target,
@@ -173,6 +179,7 @@ class HardwareService {
       quality: processed.quality,
       weight: weight.reading,
       weightError: weight.error,
+      capturedAt: capturedAt,
     );
   }
 

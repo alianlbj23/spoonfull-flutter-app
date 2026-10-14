@@ -11,7 +11,9 @@ class AppDatabase {
   final Database db;
 
   /// v2:meal_records 新增 weight_g / weight_source / edge_result (ARCHITECTURE.md §6.4)。
-  static const int _version = 2;
+  /// v3:meals 新增 assigned_patient_ids;meal_records 新增 server_flags
+  /// (server 回的 bed_mismatch / assignment_mismatch)。
+  static const int _version = 3;
 
   /// Jetson / Raspberry Pi (Linux) 與其他桌面平台透過 FFI 使用 SQLite。
   static bool _factoryReady = false;
@@ -60,6 +62,10 @@ class AppDatabase {
       );
       await db.execute('ALTER TABLE meal_records ADD COLUMN edge_result TEXT');
     }
+    if (from < 3) {
+      await db.execute('ALTER TABLE meals ADD COLUMN assigned_patient_ids TEXT');
+      await db.execute('ALTER TABLE meal_records ADD COLUMN server_flags TEXT');
+    }
   }
 
   static Future<void> _create(Database db) async {
@@ -93,6 +99,7 @@ class AppDatabase {
           meal_name TEXT NOT NULL,
           meal_type TEXT NOT NULL,
           meal_time_slot TEXT,
+          assigned_patient_ids TEXT,
           last_updated INTEGER NOT NULL,
           PRIMARY KEY (place_id, meal_id)
         )''')
@@ -120,6 +127,7 @@ class AppDatabase {
           weight_g REAL,
           weight_source TEXT NOT NULL DEFAULT 'none',
           edge_result TEXT,
+          server_flags TEXT,
           ai_status TEXT NOT NULL,
           ai_result TEXT,
           sync_status TEXT NOT NULL,

@@ -69,6 +69,26 @@ class RecordDetailDialog extends StatelessWidget {
                     const SizedBox(height: 8),
                     _kv('拍攝時間', time),
                     _kv('同步狀態', syncLabel, color: syncColor),
+                    if (record.bedMismatch || record.assignmentMismatch)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 3),
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 4,
+                          children: [
+                            if (record.bedMismatch)
+                              const MismatchBadge(
+                                key: Key('badge-bed-mismatch'),
+                                label: '床位與住民不符',
+                              ),
+                            if (record.assignmentMismatch)
+                              const MismatchBadge(
+                                key: Key('badge-assignment-mismatch'),
+                                label: '非指派膳食',
+                              ),
+                          ],
+                        ),
+                      ),
                     if (record.recordId != null) _kv('紀錄編號', record.recordId!),
                     if (record.weightG != null)
                       _kv(
@@ -125,6 +145,42 @@ class RecordDetailDialog extends StatelessWidget {
               color: color ?? Colors.black87,
               fontWeight: FontWeight.w600,
             ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// server 收下紀錄但標記有問題 (bed_mismatch / assignment_mismatch) 的小標籤。
+class MismatchBadge extends StatelessWidget {
+  const MismatchBadge({super.key, required this.label});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+    decoration: BoxDecoration(
+      color: AppColors.orangeText.withValues(alpha: 0.12),
+      border: Border.all(color: AppColors.orangeText),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(
+          Icons.warning_amber_rounded,
+          size: 16,
+          color: AppColors.orangeText,
+        ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 16,
+            color: AppColors.orangeText,
+            fontWeight: FontWeight.w600,
           ),
         ),
       ],

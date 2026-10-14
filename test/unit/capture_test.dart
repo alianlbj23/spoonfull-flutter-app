@@ -3,16 +3,19 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:spoonfull_flutter_app/config/app_constants.dart';
 import 'package:spoonfull_flutter_app/core/errors/app_exception.dart';
+import 'package:spoonfull_flutter_app/core/utils/time_utils.dart';
 import 'package:spoonfull_flutter_app/data/api/mock_api_repository.dart';
 import 'package:spoonfull_flutter_app/data/local/app_database.dart';
 import 'package:spoonfull_flutter_app/data/models/api_models.dart';
 import 'package:spoonfull_flutter_app/data/models/hardware_config.dart';
 import 'package:spoonfull_flutter_app/data/models/image_quality.dart';
 import 'package:spoonfull_flutter_app/data/models/local_meal_record.dart';
+import 'package:spoonfull_flutter_app/data/models/meal_data.dart';
 import 'package:spoonfull_flutter_app/data/models/weight_reading.dart';
 import 'package:spoonfull_flutter_app/services/hardware/camera_service.dart';
 import 'package:spoonfull_flutter_app/services/hardware/hardware_service.dart';
 import 'package:spoonfull_flutter_app/services/record_service.dart';
+import 'package:spoonfull_flutter_app/state/record_state.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 import '../helpers/test_services.dart';
@@ -264,6 +267,19 @@ void main() {
               sync_attempts INTEGER NOT NULL DEFAULT 0,
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
               error_message TEXT)''');
+          await db.execute('''
+            CREATE TABLE meals (
+              place_id TEXT NOT NULL, meal_id TEXT NOT NULL,
+              meal_name TEXT NOT NULL, meal_type TEXT NOT NULL,
+              meal_time_slot TEXT, last_updated INTEGER NOT NULL,
+              PRIMARY KEY (place_id, meal_id))''');
+          await db.insert('meals', {
+            'place_id': 'A',
+            'meal_id': 'm',
+            'meal_name': '午餐',
+            'meal_type': 'lunch',
+            'last_updated': 1,
+          });
           await db.insert('meal_records', {
             'local_id': 'old',
             'bed_id': 'b',
@@ -291,6 +307,70 @@ void main() {
     expect(record.weightG, isNull);
     expect(record.weightSource, WeightSource.none);
     expect(record.quality, isNull);
+    expect(record.serverFlags, isEmpty, reason: 'v3 server_flags 欄位');
+    final meal = MealData.fromDb((await upgraded.db.query('meals')).single);
+    expect(meal.assignedPatientIds, isEmpty, reason: 'v3 新欄位預設空');
     await upgraded.close();
+  });
+
+  test('capture records the shutter time', () async {
+    final before = DateTime.now();
+    final result = await env.services.records.capture();
+    final after = DateTime.now();
+    expect(result!.capturedAt, isNotNull);
+    expect(result.capturedAt!.isBefore(before), isFalse);
+    expect(result.capturedAt!.isAfter(after), isFalse);
+  });
+
+  test('RecordState passes the shutter time as capture_time', () async {
+    final state = RecordState(env.services);
+    addTearDown(state.dispose);
+    await state.loadAll();
+    final result = await env.services.records.capture();
+    final shutter = DateTime(2026, 10, 14, 11, 58, 7);
+    final bed = state.bedsFor('R101').firstWhere((b) => b.hasPatient);
+    final outcome = await state.upload(
+      bed: bed,
+      meal: state.meals.first,
+      slot: state.timeSlots.first,
+      phase: MealPhase.before,
+      imagePath: result!.imagePath,
+      captureTime: shutter,
+    );
+    expect(outcome.status, UploadOutcomeStatus.synced);
+    expect(api.uploads.last.captureTime, toUnix(shutter));
+    expect(outcome.record.captureTime, toUnix(shutter));
+  });
+
+  test('server flags from the record response are stored', () async {
+    final now = nowUnix();
+    final record = LocalMealRecord(
+      localId: 'flags',
+      bedId: 'R101-B1',
+      patientId: 'P1',
+      mealId: 'M1',
+      mealTimeSlot: 'T1',
+      beforeAfter: MealPhase.after,
+      imagePath: '/x.jpg',
+      captureTime: now,
+      createdAt: now,
+      updatedAt: now,
+    );
+    final saved = await env.services.records.applyResult(
+      record,
+      MealRecordResult.fromJson({
+        'record_id': '42',
+        'ai_status': 'pending',
+        'duplicate': false,
+        'assignment_mismatch': true,
+        'bed_mismatch': true,
+      }),
+    );
+    expect(saved.bedMismatch, isTrue);
+    expect(saved.assignmentMismatch, isTrue);
+    final reloaded = await env.services.storage.getRecord('flags');
+    expect(reloaded!.bedMismatch, isTrue);
+    expect(reloaded.assignmentMismatch, isTrue);
+    expect(reloaded.syncStatus, SyncStatus.synced);
   });
 }

@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import '../config/app_constants.dart';
+import '../core/utils/time_utils.dart';
 import '../data/models/bed_data.dart';
 import '../data/models/image_quality.dart';
 import '../data/models/local_meal_record.dart';
@@ -54,6 +56,10 @@ class RecordState extends ChangeNotifier {
   final Map<String, List<BedData>> _beds = {};
   List<MealData> meals = const [];
   List<TimeSlot> timeSlots = const [];
+
+  /// server 在 meals 回應附的 `current_slot` 與收到時間 (機台 unix 秒)。
+  String? _serverSlot;
+  int? _serverSlotAt;
   bool loading = false;
   bool uploading = false;
   bool capturing = false;
@@ -83,6 +89,9 @@ class RecordState extends ChangeNotifier {
         ..addAll(_groupBy(beds));
       meals = await _services.storage.getMeals(place);
       timeSlots = await _services.storage.getTimeSlots(place);
+      final (slot, slotAt) = _services.storage.currentSlotHint;
+      _serverSlot = slot;
+      _serverSlotAt = slotAt;
     } finally {
       loading = false;
       notifyListeners();
@@ -97,10 +106,22 @@ class RecordState extends ChangeNotifier {
     return map;
   }
 
-  /// 依目前時間推估時段,找不到則取第一個。
+  /// 預設時段:最近一次同步時 server 給的 `current_slot` 優先 (不受機台時鐘誤差
+  /// 影響);沒有或已超過 [AppConstants.periodicSyncInterval] 沒更新時,依機台時間
+  /// 推估,找不到則取已開始的最後一個。
   TimeSlot? currentTimeSlot([DateTime? now]) {
     if (timeSlots.isEmpty) return null;
     final t = now ?? DateTime.now();
+    final hint = _serverSlot;
+    final hintAt = _serverSlotAt;
+    if (hint != null &&
+        hintAt != null &&
+        (toUnix(t) - hintAt).abs() <=
+            AppConstants.periodicSyncInterval.inSeconds) {
+      for (final s in timeSlots) {
+        if (s.timeSlotId == hint) return s;
+      }
+    }
     for (final s in timeSlots) {
       if (s.contains(t)) return s;
     }
@@ -112,12 +133,36 @@ class RecordState extends ChangeNotifier {
     return best;
   }
 
-  /// 預設膳食:與時段餐別相同的第一筆。
-  MealData? defaultMealFor(TimeSlot? slot) {
+  /// server 有標示每份膳食的時段 (`meal_time_slot`);舊版 server 沒有。
+  bool get _mealsHaveSlots => meals.any((m) => m.mealTimeSlot != null);
+
+  /// 某時段可選的膳食:server 有標示時段就只列該時段的,指派給 [patientId] 的排前面。
+  List<MealData> mealsFor(TimeSlot? slot, {String? patientId}) {
+    final list = slot == null || !_mealsHaveSlots
+        ? List<MealData>.of(meals)
+        : meals.where((m) => m.mealTimeSlot == slot.timeSlotId).toList();
+    if (patientId == null) return list;
+    final assigned = list.where((m) => m.isAssignedTo(patientId));
+    final others = list.where((m) => !m.isAssignedTo(patientId));
+    return [...assigned, ...others];
+  }
+
+  /// 預設膳食:該時段中指派給 [patientId] 的優先,否則該時段第一筆。
+  /// server 有標示時段時絕不預選別的時段的膳食 (該時段沒有膳食就回 null);
+  /// 舊版 server 依時段推估的餐別挑選。
+  MealData? defaultMealFor(TimeSlot? slot, {String? patientId}) {
     if (meals.isEmpty) return null;
-    if (slot == null) return meals.first;
+    if (slot == null || _mealsHaveSlots) {
+      final list = mealsFor(slot, patientId: patientId);
+      return list.isEmpty ? null : list.first;
+    }
+    final sameType = mealsFor(
+      slot,
+      patientId: patientId,
+    ).where((m) => m.mealType == slot.inferredMealType).toList();
+    if (sameType.isNotEmpty) return sameType.first;
     return meals.firstWhere(
-      (m) => m.mealType == slot.inferredMealType,
+      (m) => m.isAssignedTo(patientId),
       orElse: () => meals.first,
     );
   }
@@ -147,6 +192,7 @@ class RecordState extends ChangeNotifier {
     required TimeSlot slot,
     required MealPhase phase,
     required String imagePath,
+    DateTime? captureTime,
     double? weightG,
     WeightSource weightSource = WeightSource.none,
     ImageQualityReport? quality,
@@ -163,6 +209,7 @@ class RecordState extends ChangeNotifier {
         phase: phase,
         imagePath: imagePath,
         deviceId: _services.storage.deviceConfig.deviceId,
+        captureTime: captureTime,
         weightG: weightG,
         weightSource: weightSource,
         quality: quality,

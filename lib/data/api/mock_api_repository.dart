@@ -151,4 +151,13 @@ class MockApiRepository implements ApiRepository {
 
   @override
   Future<bool> ping() async => true;
+
+  @override
+  Future<ServerHealth> checkHealth() async => ServerHealth(
+    reachable: true,
+    status: 'ok',
+    serverTime: nowUnix(),
+    apiVersion: 1,
+    checkedAt: DateTime.now(),
+  );
 }

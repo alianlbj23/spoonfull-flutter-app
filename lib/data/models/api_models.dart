@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import '../../config/app_constants.dart';
 import '../../core/utils/time_utils.dart';
 import 'ai_result.dart';
 import 'bed_data.dart';
@@ -44,10 +45,87 @@ class BedsResponse {
 }
 
 class MealsResponse {
-  const MealsResponse(this.meals, this.timeSlots, this.timestamp);
+  const MealsResponse(
+    this.meals,
+    this.timeSlots,
+    this.timestamp, {
+    this.currentSlot,
+  });
   final List<MealData> meals;
   final List<TimeSlot> timeSlots;
   final int timestamp;
+
+  /// server 依它的時鐘判斷的目前時段 (`time_slot_id`);不在任何時段內或舊版
+  /// server 時為 null。
+  final String? currentSlot;
+}
+
+/// `GET api/machine/health/` 的結果 (或舊版 server 的退回結果)。
+class ServerHealth {
+  const ServerHealth({
+    required this.reachable,
+    this.legacy = false,
+    this.status,
+    this.serverTime,
+    this.apiVersion,
+    this.checkedAt,
+    this.error,
+  });
+
+  /// 舊版 server (沒有 health API):只知道能不能連。
+  const ServerHealth.legacy({required bool reachable})
+    : this(reachable: reachable, legacy: true);
+
+  const ServerHealth.unreachable([String? error])
+    : this(reachable: false, error: error);
+
+  factory ServerHealth.fromJson(
+    Map<String, Object?> json, {
+    required DateTime checkedAt,
+  }) {
+    final status = asString(json['status']);
+    return ServerHealth(
+      reachable: status == null || status == 'ok',
+      status: status,
+      serverTime: asInt(json['server_time']),
+      apiVersion: asInt(json['api_version']),
+      checkedAt: checkedAt,
+    );
+  }
+
+  final bool reachable;
+
+  /// true = 舊版 server,沒有 health API。
+  final bool legacy;
+  final String? status;
+
+  /// server 的 unix 秒數。
+  final int? serverTime;
+  final int? apiVersion;
+
+  /// 收到回應時的機台時間。
+  final DateTime? checkedAt;
+  final String? error;
+
+  /// 機台時間 − server 時間;正值代表機台比較快。無法判斷時為 null。
+  Duration? get clockSkew {
+    if (serverTime == null || checkedAt == null) return null;
+    return Duration(seconds: toUnix(checkedAt!) - serverTime!);
+  }
+
+  bool get hasClockSkew {
+    final skew = clockSkew;
+    return skew != null && skew.abs() > AppConstants.clockSkewTolerance;
+  }
+
+  /// 給設定 / 狀態畫面的警告文字;時間正常時為 null。
+  String? get clockSkewWarning {
+    if (!hasClockSkew) return null;
+    final s = clockSkew!.inSeconds;
+    final minutes = (s.abs() / 60).toStringAsFixed(s.abs() < 600 ? 1 : 0);
+    return '機台時間比伺服器${s > 0 ? '快' : '慢'}約 $minutes 分鐘,'
+        '拍攝時間可能不正確,請校正系統時間';
+  }
 }
 
 /// api/machine/records/ 上傳參數 (ARCHITECTURE.md §6.4)。
@@ -142,6 +220,9 @@ class MealRecordResult {
     required this.aiStatus,
     this.aiResult,
     this.createdAt,
+    this.duplicate = false,
+    this.assignmentMismatch = false,
+    this.bedMismatch = false,
   });
 
   final String recordId;
@@ -150,6 +231,15 @@ class MealRecordResult {
   final String aiStatus;
   final AiResult? aiResult;
   final int? createdAt;
+
+  /// server 已經收過同一個 client_record_id (重送),回的是原本那筆。
+  final bool duplicate;
+
+  /// 這份膳食不是指派給這位住民的。
+  final bool assignmentMismatch;
+
+  /// 床位與住民不一致 (例如住民剛換床);server 以 patient_id 為準收下。
+  final bool bedMismatch;
 
   factory MealRecordResult.fromJson(Map<String, Object?> json) {
     final ai = json['ai_result'];
@@ -162,6 +252,9 @@ class MealRecordResult {
           ? AiResult.fromJson(ai.cast<String, Object?>())
           : null,
       createdAt: asInt(json['created_at']),
+      duplicate: json['duplicate'] == true,
+      assignmentMismatch: json['assignment_mismatch'] == true,
+      bedMismatch: json['bed_mismatch'] == true,
     );
   }
 }

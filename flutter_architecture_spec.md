@@ -434,7 +434,7 @@ Content-Type: multipart/form-data
 3. 如果在线:立即上传并记录server返回的record_id
 4. 如果离线:加入离线队列,稍后自动重试
 5. 重试策略:指数退避 (1s, 5s, 30s, 5min, 30min)
-6. 最多重试3次,失败后标记为failed并提示用户
+6. ~~最多重试3次,失败后标记为failed并提示用户~~ (已過時:現在無次數上限,每 30 分鐘重試直到成功;只有 server 明講 `retryable: false` 或 4xx 錯誤信封才標記 failed,見 README §3.3、§3.4)
 
 ---
 
@@ -537,8 +537,10 @@ Content-Type: multipart/form-data
 - 第4次: 5分钟后
 - 第5次: 30分钟后
 
-最多重试5次,之后标记为失败
+之后每 30 分钟一次,直到成功 (无次数上限;遵守 Retry-After)
 ```
+
+> 已過時的「最多重試 5 次」已移除,現行規則見 README §3.3、§3.4。
 
 ### 6.3 本地错误处理
 

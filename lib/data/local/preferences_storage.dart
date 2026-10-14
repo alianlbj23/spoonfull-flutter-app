@@ -20,7 +20,13 @@ class PreferencesStorage {
   static const _lastSync = 'device_config.last_sync';
   static const _serverHost = 'server.host';
   static const _serverPort = 'server.port';
+
+  /// 伺服器設定格式版本。v1 (沒有這個 key):host + port,沒寫協定一律 http。
+  /// v2:host 可為完整網址,port 可省略,公開網域預設 https。
+  static const _serverConfigVersion = 'server.config_version';
   static const _syncPrefix = 'sync.last_updated.';
+  static const _currentSlot = 'meals.current_slot';
+  static const _currentSlotAt = 'meals.current_slot_at';
   static const _hardware = 'hardware.config';
 
   static Future<PreferencesStorage> create() async =>
@@ -51,16 +57,51 @@ class PreferencesStorage {
     await _setOrRemoveInt(_lastSync, c.lastSync);
   }
 
-  ServerSettings readServerSettings() => ServerSettings(
-    host: _prefs.getString(_serverHost) ?? '',
-    port: _prefs.getString(_serverPort) ?? '',
-    placeId: _prefs.getString(_location) ?? '',
-  );
+  ServerSettings readServerSettings() {
+    var host = _prefs.getString(_serverHost) ?? '';
+    var port = _prefs.getString(_serverPort) ?? '';
+    if ((_prefs.getInt(_serverConfigVersion) ?? 1) < 2) {
+      final legacy = legacyBaseUrl(host, port);
+      if (legacy != null) {
+        // 把舊格式換成完整網址 (保留原本的 http 與埠),升級後連到同一個位址。
+        host = legacy.endsWith('/')
+            ? legacy.substring(0, legacy.length - 1)
+            : legacy;
+        port = '';
+        _prefs.setString(_serverHost, host);
+        _prefs.setString(_serverPort, port);
+      }
+      _prefs.setInt(_serverConfigVersion, 2);
+    }
+    return ServerSettings(
+      host: host,
+      port: port,
+      placeId: _prefs.getString(_location) ?? '',
+    );
+  }
 
   Future<void> writeServerSettings(ServerSettings s) async {
     await _prefs.setString(_serverHost, s.host.trim());
     await _prefs.setString(_serverPort, s.port.trim());
     await _prefs.setString(_location, s.placeId.trim());
+    await _prefs.setInt(_serverConfigVersion, 2);
+  }
+
+  /// v1 的 BASE_URL 組法:沒寫協定時預設 http,[port] 覆蓋網址裡的埠。
+  static String? legacyBaseUrl(String host, String port) {
+    var h = host.trim();
+    if (h.isEmpty) return null;
+    if (!h.startsWith('http://') && !h.startsWith('https://')) {
+      h = 'http://$h';
+    }
+    final uri = Uri.tryParse(h);
+    if (uri == null || uri.host.isEmpty) return null;
+    final p = int.tryParse(port.trim());
+    final withPort = p == null ? uri : uri.replace(port: p);
+    final path = withPort.path.endsWith('/')
+        ? withPort.path
+        : '${withPort.path}/';
+    return withPort.replace(path: path).toString();
   }
 
   /// 硬體設定 (相機 / 秤 / 參考照),以 JSON 保存。
@@ -84,6 +125,19 @@ class PreferencesStorage {
 
   Future<void> setLastUpdated(String dataset, int? ts) =>
       _setOrRemoveInt('$_syncPrefix$dataset', ts);
+
+  /// server 在 meals 回應附的 `current_slot`,與收到時的機台時間 (unix 秒)。
+  (String?, int?) readCurrentSlot() =>
+      (_prefs.getString(_currentSlot), _prefs.getInt(_currentSlotAt));
+
+  Future<void> writeCurrentSlot(String? slot, int at) async {
+    if (slot == null) {
+      await _prefs.remove(_currentSlot);
+    } else {
+      await _prefs.setString(_currentSlot, slot);
+    }
+    await _prefs.setInt(_currentSlotAt, at);
+  }
 
   Future<void> clearSyncTimestamps() async {
     for (final k in _prefs.getKeys().where((k) => k.startsWith(_syncPrefix))) {

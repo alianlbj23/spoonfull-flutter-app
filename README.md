@@ -93,8 +93,8 @@ main()
      │   ├─ 將上次異常中斷而卡在 processing 的佇列項目改回 pending
      │   ├─ 監聽網路狀態 (斷線 → 恢復時自動同步)
      │   ├─ 每 30 分鐘強制完整同步一次
-     │   └─ 若已配對 → 連上推播 ws/machine/ (server 資料一變動就重抓,§4.7)
-     ├─ ping 伺服器 (GET BASE_URL,歡迎畫面「伺服器」燈號)
+     │   └─ 若已配對 → 連上推播 api/machine/ws/ (server 資料一變動就重抓,§4.7)
+     ├─ 健康檢查 GET api/machine/health/ (歡迎畫面「伺服器」燈號;順便檢查機台時鐘,§4.0)
      └─ 若已配對 → syncAll():更新快取 + 上傳離線佇列
 ```
 
@@ -103,10 +103,10 @@ main()
 ```
 歡迎畫面
  └─ 點左上齒輪 → 伺服器設定畫面
-      輸入:伺服器位址、埠號、場域 (place_id)
+      輸入:伺服器位址 (可輸入完整網址)、埠號 (選填)、場域 (place_id)
       儲存 ─┬─ 尚未配對 → 配對碼畫面 → 輸入 6 位數配對碼
             │                 └─ POST api/machine/pair/ → 取得 token
-            │                      └─ 立即強制同步 (rooms / beds / meals)
+            │                      └─ 佇列中等待重試的紀錄改成立即上傳,並強制同步 (rooms / beds / meals)
             └─ 已配對且位址/埠/場域有變更 → 自動解除配對並清除快取 → 需重新配對
 歡迎畫面「開始使用」→ 病房列表 → 床位 → 餐前/餐後 → 放餐盒 → 拍照 + 秤重 (同時) → 品質檢查 → 確認 (時段/膳食/重量) → 上傳
 ```
@@ -117,19 +117,23 @@ main()
 2. 照片縮到**長邊 1280、JPEG 品質 80**,並做純 CPU 品質檢查:過暗、過亮、模糊(Laplacian 變異數)、餐盒不在畫面(與「空秤參考照」比對,沒有參考照則看畫面中央邊緣密度與對比)。不通過時提示重拍,也可選「仍要使用」。
 3. 確認畫面左下顯示重量與來源(秤 / 手動),可「重新秤重」或「手動輸入」;沒有秤時不送重量。
 
-**BASE_URL 組法**([device_config.dart](lib/data/models/device_config.dart) `ServerSettings.baseUrl`):
+**BASE_URL 組法**([server_address.dart](lib/core/utils/server_address.dart) `ServerAddress.resolve`,設定畫面在位址欄下方即時顯示「將連線到 …」):
 
-- 位址沒寫協定時預設為 `http://`;要用 HTTPS 請在位址欄直接輸入 `https://…`
-- 結果格式為 `http://{host}:{port}/`;位址可帶子路徑,例如 `192.168.1.10/spoonfull` → `http://192.168.1.10:8080/spoonfull/`
-- 所有 API 路徑都是**相對路徑**,接在 BASE_URL 後面,例如 `http://192.168.1.10:8080/api/machine/rooms/`
+- 位址欄可直接輸入完整網址:公開站台 `https://foodintakesystem.com`、院內 `http://192.168.1.10:8000`
+- **埠可省略**,依協定預設 443(https)/ 80(http);網址裡有寫埠就以網址為準,否則才用埠欄位
+- 只輸入主機名稱 / IP 時:院內區網位址(私有 IP `10.*` / `172.16–31.*` / `192.168.*`、`localhost`、`*.local`、沒有點的單段主機名稱)預設 `http://`,**其他(公開網域)預設 `https://`**
+- 公開網域輸入 `http://` 會被拒絕(「公開網址必須使用 https://…」),避免 token 與照片以明文經過網際網路
+- 位址可帶子路徑,例如 `192.168.1.10:8080/spoonfull` → `http://192.168.1.10:8080/spoonfull/`
+- 所有 API 路徑都是**相對路徑**,接在 BASE_URL 後面,例如 `https://foodintakesystem.com/api/machine/rooms/`
+- 舊版存的設定(位址 + 埠,沒寫協定一律 http)升級後會自動轉成完整網址,仍連到原本的位址(包含公開網域的 http,狀態畫面會提示未加密)
 
 ### 2.3 什麼時候會發請求
 
 | 時機 | 發出的請求 |
 |---|---|
-| 啟動、儲存設定、配對成功後 | `GET /`(ping,只要有任何 HTTP 回應就算可連線,5 秒逾時) |
+| 啟動、儲存設定、配對成功、按「重新整理資料」 | `GET api/machine/health/`(5 秒逾時;舊版 server 回 404 時退回 `GET /`,有任何 HTTP 回應就算可連線) |
 | 配對 | `POST api/machine/pair/` |
-| 配對成功後 | 三個查詢 API 全部重抓(不帶 `last_updated`),並建立推播連線 `ws/machine/` |
+| 配對成功後 | 佇列中所有待上傳紀錄改成立即上傳;三個查詢 API 全部重抓(不帶 `last_updated`),並建立推播連線 `api/machine/ws/` |
 | 推播連線建立(含斷線重連) | 三個查詢 API 全部重抓,補上斷線期間錯過的變動 |
 | 收到推播 `data_changed` | 只重抓事件列出的資料(1.5 秒內的多個事件合併成一次),見 §4.7 |
 | 啟動、網路恢復時 | 查詢 API:病房/床位超過 1 小時、膳食超過 24 小時才重抓 |
@@ -146,11 +150,11 @@ main()
 | 項目 | 規格 |
 |---|---|
 | 路徑 | 全部相對於 BASE_URL,**結尾一律有斜線**(`api/machine/.../`),避免 Django `APPEND_SLASH` 把 POST 轉址而丟掉 body |
-| 協定 | HTTP/1.1(院內區網通常是 `http`,也支援 `https`) |
+| 協定 | HTTP/1.1(院內區網通常是 `http`;經 Cloudflare 的公開網址一律 `https`) |
 | 編碼 | 回應 body 一律以 **UTF-8** 解碼 |
 | 時間 | 所有時間戳都是 **Unix timestamp(秒)**,不是毫秒 |
 | 認證 | 除了配對以外,所有請求都帶 `Authorization: Bearer {device_token}` |
-| 逾時 | 一般請求 15 秒;上傳 60 秒;ping 5 秒 |
+| 逾時 | 一般請求 15 秒;上傳 60 秒;健康檢查 5 秒 |
 | 查詢參數 | 值為空字串的參數會被省略,不會送出 |
 | 數字欄位 | 機台可以接受字串數字(`"12"`)或 JSON 數字(`12`),兩者都能解析 |
 
@@ -167,38 +171,51 @@ main()
 **失敗**:
 
 ```json
-{ "success": false, "error": { "code": "INVALID_PAIRING_CODE", "message": "配對碼無效或已過期" } }
+{ "success": false, "error": { "code": "INVALID_PAIRING_CODE", "message": "配對碼無效或已過期", "retryable": false } }
 ```
 
-`error.message` 會**直接顯示在機台螢幕上**,請用使用者看得懂的中文。
+`error.message` 會**直接顯示在機台螢幕上**,請用使用者看得懂的中文(配對錯誤原樣顯示,不加前綴)。
+`error.retryable`(新版 server 一律附上)告訴機台這個錯誤值不值得重試;機台**以它為準**,舊版 server 沒給時才依 §3.3 的狀態碼判斷。
 
 ### 3.3 HTTP 狀態碼與機台行為
 
-接收器回的狀態碼會決定機台**要不要重試**,這點很重要:
+接收器回的狀態碼會決定機台**要不要重試**,這點很重要([api_client.dart](lib/data/api/api_client.dart) `_mapError`、[app_exception.dart](lib/core/errors/app_exception.dart) `isRetryable`):
 
 | 接收器回應 | 機台行為 |
 |---|---|
 | 2xx + `success:true` | 成功 |
-| **401**,或任何狀態碼且 `error.code = "TOKEN_EXPIRED"` | 清除 token、**強制解除配對**,回到歡迎畫面;待上傳的資料保留,重新配對後繼續送 |
-| 403 | 顯示錯誤,**不重試** |
-| 422 | 資料驗證失敗,**不重試** |
-| 其他 4xx | 顯示錯誤,**不重試** |
+| 錯誤信封帶 `error.retryable` | **照 server 說的做**(`true` 重試、`false` 不重試) |
+| **401**(JSON 回應),或 JSON 的 `error.code = "TOKEN_EXPIRED"` | 清除 token、**強制解除配對**,回到歡迎畫面;待上傳的資料保留,重新配對後立刻補傳 |
+| 4xx 的 JSON 錯誤信封(403、422、其他 4xx,**408 / 429 除外**) | 顯示錯誤,**不重試** |
+| 408、429 | **會重試**;有 `Retry-After`(秒數或 HTTP 日期)時,下次至少等那麼久 |
 | **5xx** | 進入離線佇列,**會重試** |
-| 連線失敗 / 逾時 | 進入離線佇列,**會重試** |
-| 2xx 但 `success != true` | 視為 4xx,**不重試** |
-| 2xx 但 body 不是 JSON | 視為格式錯誤,**不重試** |
+| 連線失敗 / 逾時 / TLS 交握失敗 / 其他 I/O 錯誤 | 進入離線佇列,**會重試** |
+| **不是 JSON 的回應**(HTML、空 body:Cloudflare Access 登入頁、WAF 403、502 / 530 錯誤頁)、3xx、JSON 但沒有錯誤信封 | 視為代理或網路問題,**會重試**;不會因此解除配對,紀錄**不會**因此被標成永久失敗 |
+| 2xx 但 `success != true` 且有 `error.code` | 依 `retryable`,沒給則**重試** |
 
-> **設計接收器時請注意**:只有暫時性的問題(資料庫忙碌、磁碟滿、AI 服務掛掉)才回 5xx。資料本身有錯要回 4xx,否則機台會一直重送同一筆錯誤資料。
+> **設計接收器時請注意**:只有暫時性的問題(資料庫忙碌、磁碟滿、AI 服務掛掉)才回 5xx。資料本身有錯要回 4xx 的錯誤信封(最好附 `retryable: false`),否則機台會一直重送同一筆錯誤資料。
 
 ### 3.4 上傳重試策略
 
-上傳失敗後,依序間隔 **1 秒 → 5 秒 → 30 秒 → 5 分鐘 → 30 分鐘**重試,之後**每 30 分鐘一次,直到成功**:網路中斷、逾時、5xx 與 401 都不會放棄,server 停機再久,恢復後都會自動補傳。只有不可重試的錯誤(4xx、422)才標記為 failed,由使用者在紀錄畫面確認後手動重試。佇列依建立時間先進先出(FIFO),遇到網路中斷或 401 就停止這一輪。
+上傳失敗後,依序間隔 **1 秒 → 5 秒 → 30 秒 → 5 分鐘 → 30 分鐘**重試,之後**每 30 分鐘一次,直到成功**(沒有次數上限):網路中斷、逾時、5xx、代理回的 HTML 與 401 都不會放棄,server 停機再久,恢復後都會自動補傳。server 回 `Retry-After` 時,下次重試至少等那麼久。只有不可重試的錯誤(§3.3:`retryable: false`,或舊版 server 的 4xx 錯誤信封)才標記為 failed,由使用者在紀錄畫面確認後手動重試。佇列依建立時間先進先出(FIFO),遇到網路中斷或 401 就停止這一輪;重新配對成功後,所有待上傳項目立即重試,不等退避。
+
+**餐前先到**:餐後照片上傳前,若同一住民、同一時段、同一天(機台當地日期)的餐前照片還在佇列裡,餐後照片先留在佇列(不算失敗),約 5 秒後或排在餐前那筆的下次重試之後再試,確保 server 先收到餐前。
 
 每筆紀錄在上傳前就連同佇列項目一起寫入本機資料庫;上傳到一半斷電或當機,下次啟動會自動補傳。所以**同一筆紀錄可能送到兩次**,接收器一定要依 `client_record_id` 去重(見 §4.6)。
 
 ---
 
 ## 4. API 規格
+
+### 4.0 `GET api/machine/health/` — 健康檢查(不需認證)
+
+```json
+{ "success": true, "data": { "status": "ok", "server_time": 1726900123, "api_version": 1 } }
+```
+
+- 歡迎畫面燈號、設定畫面儲存 / 「重新整理資料」都用它測試連線;回 5xx 或 HTML(例如 Cloudflare 502)就算無法連線
+- 舊版 server 沒有這支(回 **404**)時,退回舊做法:`GET BASE_URL`,有任何 HTTP 回應就算可連線
+- `server_time` 與機台時間相差超過 **120 秒**時,設定畫面與「系統狀態」顯示「機台時間比伺服器快/慢約 N 分鐘…」警告並寫 log(`capture_time` 依賴機台時鐘)
 
 ### 4.1 `POST api/machine/pair/` — 機台配對
 
@@ -237,7 +254,8 @@ main()
 
 - `device_token` **必填且不可為空**,否則配對失敗
 - `expires_in`(秒)可以不給;不給的話機台端視 token 永不過期,只有收到 401 時才會失效
-- 建議錯誤碼:`INVALID_PAIRING_CODE`、`DEVICE_ALREADY_PAIRED`、`SERVER_ERROR`
+- 錯誤碼:`INVALID_PAIRING_CODE`(400)、`DEVICE_DISABLED`(422,管理員已停用此機台;重新配對不會自動啟用)、`THROTTLED`(429,嘗試太多次,可帶 `Retry-After` 秒數)、`SERVER_ERROR`
+- 配對失敗時機台**原樣顯示** `error.message`;收到 `THROTTLED` 後配對按鈕停用 `Retry-After` 秒(沒給則 60 秒)並顯示倒數
 - 同一台機台(同 `device_id`)可能因為更改設定或 401 而**再次配對**,接收器應允許重新配對並發放新 token
 
 ### 4.2 `GET api/machine/rooms/` — 病房列表
@@ -292,11 +310,13 @@ main()
 {
   "success": true,
   "data": {
+    "current_slot": "lunch",
     "meals": [
-      { "place_id": "WARD7", "meal_id": "M1", "meal_name": "一般早餐", "meal_type": "breakfast", "updated_at": 1726900000 }
+      { "place_id": "WARD7", "meal_id": "M1", "meal_name": "一般午餐", "meal_type": "lunch",
+        "meal_time_slot": "lunch", "assigned_patient_ids": ["12", "15"], "updated_at": 1726900000 }
     ],
     "time_slots": [
-      { "time_slot_id": "T1", "time_slot_name": "07:00 - 08:30", "start_time": "07:00", "end_time": "08:30" }
+      { "time_slot_id": "lunch", "time_slot_name": "午餐 11:00 - 13:30", "start_time": "11:00", "end_time": "13:30" }
     ],
     "timestamp": 1726900123
   }
@@ -306,6 +326,10 @@ main()
 - `meal_type` 只能是 `breakfast` / `lunch` / `dinner` / `snack`,其他值一律當成 `snack`
 - `start_time` / `end_time` 格式為 `HH:MM`(24 小時制)。機台依目前時間自動選時段,並依開始時間推估餐別:早於 10:30 為早餐、早於 15:00 為午餐、早於 21:00 為晚餐,其餘為點心
 - `time_slots` 的陣列順序就是畫面上的顯示順序
+- `current_slot`(選填):server 依它的時鐘判斷的目前時段 `time_slot_id`,不在任何時段內時為 `null`。機台預設選這個時段(收到後 30 分鐘內有效,過期才退回機台時鐘推估),不受機台時鐘誤差影響
+- `meal_time_slot`(選填):這份膳食屬於哪個時段。只要有任何膳食帶這個欄位,確認畫面就**只列出所選時段的膳食**,絕不預選別的時段的菜
+- `assigned_patient_ids`(選填):指派這份膳食的住民。確認畫面優先預選、並排在最前面的是指派給該住民的膳食
+- 舊版 server 沒有這些欄位時,機台依時段開始時間推估餐別來預選(舊行為)
 
 ### 4.5 增量同步(`last_updated`)
 
@@ -327,7 +351,7 @@ main()
 | `meal_id` | 文字 | 來自 meal_data |
 | `meal_time_slot` | 文字 | **`time_slot_id`**(例如 `T1`),不是顯示名稱 |
 | `before_after` | 文字 | `before`(送餐前)或 `after`(回收後) |
-| `capture_time` | 文字(數字) | 拍照時間,Unix 秒(機台時鐘,機台應開 NTP)。server 存入 `captured_at` |
+| `capture_time` | 文字(數字) | **快門時間**(相機拍到 / 選好檔案的那一刻,不是按上傳的時間),Unix 秒(機台時鐘,機台應開 NTP;時鐘與 server 差超過 2 分鐘時設定 / 狀態畫面會警告)。server 存入 `captured_at` |
 | `device_id` | 文字 | 與配對時相同,可用來比對 token |
 | `client_record_id` | 文字 | **一定會帶**。App 本機紀錄的 UUID,**去重鍵**:同一 `client_record_id` 再送一次 → 回原本的 `record_id`,不新增 |
 | `weight_g` | 文字(數字,1 位小數) | 整盤重量(公克),餐前餐後各一次,**容器重量在餐前−餐後相減時自動抵消**。沒有秤或沒讀到時**不帶此欄位**,server 以菜單標準份量估算並標記 `weight_source=estimated` |
@@ -347,7 +371,7 @@ main()
 
 - 檔案 ≤ 5 MB,格式依檔頭判斷只接受 JPEG / PNG
 - 尺寸:長邊 480–4000、短邊 320–3000;拍攝後已縮到**長邊 ≤ 1280、JPEG 品質 80**
-- `bed_id` 存在於該病房,且 `patient_id` 與床位目前的病患一致
+- `bed_id` 存在於該病房,且 `patient_id` 與床位目前的病患一致(依機台快取;server 端若發現不一致但 `patient_id` 是有效住民,會以 `patient_id` 為準收下並回 `bed_mismatch: true`)
 - `weight_g`(若有)為 0–20000 的有限數
 
 **成功回應**:
@@ -357,6 +381,9 @@ main()
   "success": true,
   "data": {
     "record_id": "SRV-000123",
+    "duplicate": false,
+    "assignment_mismatch": false,
+    "bed_mismatch": false,
     "image_path": "/uploads/2026/09/21/abc.jpg",
     "capture_time": 1726900200,
     "ai_status": "completed",
@@ -377,6 +404,9 @@ main()
 | `record_id` | 是 | 伺服器端紀錄 ID,機台保存後,這筆紀錄標記為已同步 |
 | `ai_status` | 否 | `pending` / `processing` / `completed` / `failed`;不給則視為 `pending` |
 | `ai_result` | 否 | 可為 `null`。`leftover_percentage` 範圍 0–100,`confidence` 範圍 0–1,`note` 會顯示給使用者 |
+| `duplicate` | 否 | `true` = 這個 `client_record_id` 之前已收過,回的是原本那筆;機台只寫 log |
+| `assignment_mismatch` | 否 | `true` = 這份膳食不是指派給這位住民的;機台寫 log,紀錄詳情顯示「非指派膳食」標籤 |
+| `bed_mismatch` | 否 | `true` = 床位與住民不一致,server 以 `patient_id` 為準收下;機台寫 log,紀錄詳情顯示「床位與住民不符」標籤 |
 | 其他 | 否 | 機台目前不使用 `image_path`、`capture_time`、`created_at` |
 
 > **機台不會回頭查詢 AI 結果**。上傳後只顯示這次回應裡的 `ai_result`。依 ARCHITECTURE.md 的設計,server 收到照片立刻存檔回 200,分析由 `vision-worker` 排隊處理,所以正常回應就是 `ai_status: "pending"`、`ai_result: null`,機台會顯示「等待辨識」,結果在網頁上看。
@@ -396,11 +426,11 @@ main()
 
 > 舊版 App(沒有 `client_record_id`)可退回用 `(device_id, bed_id, meal_id, meal_time_slot, before_after, capture_time)` 判斷。
 
-### 4.7 `WS ws/machine/` — 推播:資料一變動就通知機台
+### 4.7 `WS api/machine/ws/` — 推播:資料一變動就通知機台
 
 病房、床位、用餐時段在機台上都是快取。為了讓 server 端改了住民房號或用膳時間後**立即**反映在機台,已配對的機台會另外保持一條 WebSocket;server 一有變動就推一則事件,機台收到後馬上重抓對應的查詢 API。沒有這條連線機台也能用(退回 30 分鐘定時同步),所以接收器可以選擇不實作。
 
-- **位址**:`BASE_URL` 的 `http`/`https` 對應成 `ws`/`wss`,路徑 `ws/machine/`。例如 `http://192.168.0.10:8000/` → `ws://192.168.0.10:8000/ws/machine/`
+- **位址**:`BASE_URL` 的 `http`/`https` 對應成 `ws`/`wss`,路徑 `api/machine/ws/`。例如 `https://foodintakesystem.com/` → `wss://foodintakesystem.com/api/machine/ws/`、`http://192.168.0.10:8000/` → `ws://192.168.0.10:8000/api/machine/ws/`。舊路徑 `ws/machine/` 只在區網還能用,經 Cloudflare 公開網址會被擋
 - **認證**:與 REST 相同,`Authorization: Bearer <device_token>` header。token 無效或機台被停用時,server **先接受再以 close code 4401 關閉**;機台視同 REST 401:清除 token、停止重連、回到配對畫面
 - **server → 機台**(JSON 文字訊息):
   - 連上後先收 `{ "event": "connected", "device_id": "...", "machine_id": 1, "server_time": "..." }`
@@ -515,7 +545,8 @@ curl -X POST http://localhost:8080/api/machine/records/ \
 | 想了解 | 看這裡 |
 |---|---|
 | API 路徑、逾時、重試間隔、圖片限制 | [lib/config/app_constants.dart](lib/config/app_constants.dart) |
-| HTTP 封裝、回應解析、狀態碼對應 | [lib/data/api/api_client.dart](lib/data/api/api_client.dart) |
+| HTTP 封裝、回應解析、狀態碼 / `retryable` / `Retry-After` 對應、健康檢查 | [lib/data/api/api_client.dart](lib/data/api/api_client.dart) |
+| 伺服器位址 → BASE_URL (完整網址、預設埠、http/https 規則) | [lib/core/utils/server_address.dart](lib/core/utils/server_address.dart) |
 | 每個 API 送什麼、讀什麼 | [lib/data/api/api_repository.dart](lib/data/api/api_repository.dart)、[lib/data/models/](lib/data/models/) |
 | 假資料(可當作回應範本) | [lib/data/api/mock_api_repository.dart](lib/data/api/mock_api_repository.dart) |
 | 配對 / token | [lib/services/device_pairing_service.dart](lib/services/device_pairing_service.dart);Linux 無 keyring 時退回檔案儲存:[lib/data/local/secure_token_storage.dart](lib/data/local/secure_token_storage.dart) |

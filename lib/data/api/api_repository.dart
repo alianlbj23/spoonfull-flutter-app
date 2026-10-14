@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import '../../config/app_constants.dart';
+import '../../core/errors/app_exception.dart';
+import '../../core/utils/logger.dart';
 import '../../core/utils/time_utils.dart';
 import '../models/api_models.dart';
 import '../models/bed_data.dart';
@@ -31,7 +33,11 @@ abstract class ApiRepository {
 
   Future<MealRecordResult> uploadMealRecord(MealRecordUpload upload);
 
+  /// 伺服器是否可連線 (`api/machine/health/`,舊版 server 退回舊做法)。
   Future<bool> ping();
+
+  /// 健康檢查,另外帶回 server 時間供時鐘誤差檢查。
+  Future<ServerHealth> checkHealth();
 }
 
 class HttpApiRepository implements ApiRepository {
@@ -98,16 +104,26 @@ class HttpApiRepository implements ApiRepository {
     );
     final meals = _list(data['meals']).map(MealData.fromApi).toList();
     final slots = _list(data['time_slots']);
+    final current = asString(data['current_slot']);
     return MealsResponse(
       meals,
       [for (var i = 0; i < slots.length; i++) TimeSlot.fromApi(slots[i], i)],
       asInt(data['timestamp']) ?? nowUnix(),
+      currentSlot: (current == null || current.isEmpty) ? null : current,
     );
   }
 
   @override
   Future<MealRecordResult> uploadMealRecord(MealRecordUpload upload) async {
     final file = File(upload.imagePath);
+    // 照片不見了重試也沒用;其他 I/O 錯誤 (暫時讀不到) 會照常重試。
+    if (!await file.exists()) {
+      throw const AppException(
+        AppErrorType.localValidation,
+        '照片檔案不存在,無法上傳',
+        code: 'IMAGE_MISSING',
+      );
+    }
     final bytes = await file.readAsBytes();
     final ext = p.extension(upload.imagePath).toLowerCase();
     final data = await _client.postMultipart(
@@ -118,11 +134,25 @@ class HttpApiRepository implements ApiRepository {
       fileName: p.basename(upload.imagePath),
       mimeType: ext == '.png' ? 'image/png' : 'image/jpeg',
     );
-    return MealRecordResult.fromJson(data);
+    final result = MealRecordResult.fromJson(data);
+    if (result.duplicate ||
+        result.assignmentMismatch ||
+        result.bedMismatch) {
+      Log.i(
+        'record ${upload.clientRecordId} → ${result.recordId}: '
+        'duplicate=${result.duplicate} '
+        'assignment_mismatch=${result.assignmentMismatch} '
+        'bed_mismatch=${result.bedMismatch}',
+      );
+    }
+    return result;
   }
 
   @override
   Future<bool> ping() => _client.ping();
+
+  @override
+  Future<ServerHealth> checkHealth() => _client.checkHealth();
 
   static List<Map<String, Object?>> _list(Object? value) => value is List
       ? value.whereType<Map>().map((m) => m.cast<String, Object?>()).toList()

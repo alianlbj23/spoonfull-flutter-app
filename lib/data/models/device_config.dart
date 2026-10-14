@@ -1,3 +1,5 @@
+import '../../core/utils/server_address.dart';
+
 /// 設備配置 (規格 3.1.1),保存於 SharedPreferences。
 class DeviceConfig {
   const DeviceConfig({
@@ -37,6 +39,9 @@ class DeviceConfig {
 }
 
 /// 設定畫面的伺服器連線資訊。
+///
+/// [host] 可以是完整網址 (`https://foodintakesystem.com`) 或主機名稱 / IP;
+/// [port] 可省略 (依協定預設 443 / 80)。解析規則見 [ServerAddress]。
 class ServerSettings {
   const ServerSettings({
     this.host = '',
@@ -48,27 +53,16 @@ class ServerSettings {
   final String port;
   final String placeId;
 
-  bool get isComplete =>
-      host.trim().isNotEmpty &&
-      port.trim().isNotEmpty &&
-      placeId.trim().isNotEmpty;
+  /// 依新規則解析 (設定畫面用;公開網域的 http 會有 [ServerAddress.error])。
+  ServerAddress get address => ServerAddress.resolve(host, port: port);
 
-  /// 由位址與埠組成 BASE_URL,未指定協定時預設 http (院內區網)。
-  String? get baseUrl {
-    if (host.trim().isEmpty) return null;
-    var h = host.trim();
-    if (!h.startsWith('http://') && !h.startsWith('https://')) {
-      h = 'http://$h';
-    }
-    final uri = Uri.tryParse(h);
-    if (uri == null || uri.host.isEmpty) return null;
-    final p = int.tryParse(port.trim());
-    final withPort = p == null ? uri : uri.replace(port: p);
-    final path = withPort.path.endsWith('/')
-        ? withPort.path
-        : '${withPort.path}/';
-    return withPort.replace(path: path).toString();
-  }
+  bool get isComplete => baseUrl != null && placeId.trim().isNotEmpty;
+
+  /// 實際連線用的 BASE_URL (結尾有 `/`)。已存的舊設定即使是公開網域的 http
+  /// 也照常連線 (設定畫面會提示改用 https)。
+  String? get baseUrl =>
+      ServerAddress.resolve(host, port: port, allowInsecurePublic: true)
+          .baseUrl;
 
   @override
   bool operator ==(Object other) =>

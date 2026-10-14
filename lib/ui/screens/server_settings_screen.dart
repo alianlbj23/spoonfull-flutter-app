@@ -39,7 +39,8 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
   void initState() {
     super.initState();
     final s = context.read<DeviceState>().serverSettings;
-    _host = TextEditingController(text: s.host);
+    _host = TextEditingController(text: s.host)
+      ..addListener(() => setState(() {}));
     _place = TextEditingController(text: s.placeId);
     _port = s.port;
   }
@@ -57,9 +58,11 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
     placeId: _place.text.trim(),
   );
 
-  bool get _hostInvalid =>
-      _host.text.trim().isEmpty || _settings.baseUrl == null;
+  bool get _hostInvalid => !_settings.address.isValid;
+
+  /// 埠可省略 (依協定預設 443 / 80);有填就必須是合法的埠。
   bool get _portInvalid {
+    if (_port.trim().isEmpty) return false;
     final p = int.tryParse(_port);
     return p == null || p <= 0 || p > 65535;
   }
@@ -178,15 +181,15 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
                   controller: _host,
                   error: hostErr,
                   keyboardType: TextInputType.url,
-                  hint: '192.168.0.10',
+                  hint: 'https://foodintakesystem.com',
                 ),
-                const SizedBox(height: 22),
-                _label('埠', portErr),
+                _ResolvedAddress(settings: _settings, showErrors: _showErrors),
+                _label('埠 (選填)', portErr),
                 PillField(
                   fieldKey: const Key('field-port'),
                   value: _port,
                   error: portErr,
-                  hint: '80',
+                  hint: '預設 443 / 80',
                   onTap: _editPort,
                 ),
                 const SizedBox(height: 22),
@@ -199,6 +202,31 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
               ],
             ),
           ),
+          if (context.watch<DeviceState>().clockSkewWarning case final w?)
+            Positioned(
+              left: left,
+              right: 16,
+              top: 440,
+              child: Row(
+                key: const Key('clock-skew-warning'),
+                children: [
+                  const Icon(
+                    Icons.schedule_rounded,
+                    color: AppColors.orangeText,
+                    size: 26,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      w,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppText.size(20, color: AppColors.orangeText),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           Positioned(
             left: left + 165,
             top: 485,
@@ -226,6 +254,48 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 位址欄下方的一行:實際會連到的網址,或格式錯誤 / 公開網域用 http 的提示。
+class _ResolvedAddress extends StatelessWidget {
+  const _ResolvedAddress({required this.settings, required this.showErrors});
+
+  final ServerSettings settings;
+  final bool showErrors;
+
+  @override
+  Widget build(BuildContext context) {
+    final address = settings.address;
+    final empty = settings.host.trim().isEmpty;
+    final String text;
+    final Color color;
+    if (empty) {
+      text = '可輸入完整網址,例如 https://foodintakesystem.com';
+      color = AppColors.navy.withValues(alpha: 0.6);
+    } else if (address.error != null) {
+      // 打字中不要一直顯示紅字;按過儲存或格式已可判斷 (http 公開網址) 才顯示。
+      text = address.error!;
+      color = showErrors || address.uri != null
+          ? AppColors.error
+          : AppColors.navy.withValues(alpha: 0.6);
+    } else {
+      text = '將連線到 ${address.baseUrl}';
+      color = AppColors.navy;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(left: 16, top: 2, bottom: 4),
+      child: SizedBox(
+        width: 726,
+        child: Text(
+          text,
+          key: const Key('resolved-url'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: AppText.size(20, color: color),
+        ),
       ),
     );
   }
@@ -292,8 +362,17 @@ class SystemStatusDialog extends StatelessWidget {
                   ? AppColors.success
                   : AppColors.error,
             ),
+            row('伺服器網址', device.serverSettings.baseUrl ?? '未設定'),
             if (device.serverSettings.baseUrl?.startsWith('http://') ?? false)
               row('連線加密', '未加密 (http),資料以明文傳輸', color: AppColors.orangeText),
+            if (device.clockSkewWarning != null)
+              row(
+                '機台時間',
+                device.clockSkewWarning!,
+                color: AppColors.orangeText,
+              ),
+            if (device.serverHealth?.legacy ?? false)
+              row('伺服器版本', '舊版 (沒有健康檢查 API)'),
             row('最後同步', lastSync),
             row('待上傳', '${sync.pendingCount} 筆'),
             row(

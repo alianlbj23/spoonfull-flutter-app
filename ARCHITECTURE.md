@@ -71,14 +71,14 @@
 | 功能 | 狀態 | 說明 |
 |---|---|---|
 | 選病房 → 床位 → 菜色 → 餐前／餐後 → 拍照 → 上傳 | 已有 | |
-| 離線佇列、重試（1s → 5s → 30s → 5m，之後每 30m 直到成功） | 已有 | 依 HTTP 狀態碼決定是否重試，見 §6.3；只有 4xx / 422 不重試 |
+| 離線佇列、重試（1s → 5s → 30s → 5m，之後每 30m 直到成功） | 已有 | 以錯誤信封的 `retryable` 為準；舊版 server 沒給時只有 4xx 錯誤信封（408 / 429 除外）不重試，代理回的 HTML 一律重試；遵守 `Retry-After`，見 §6.3 與 README §3.3 |
 | 配對、token 儲存 | 已有 | Linux kiosk 沒有 keyring 時自動改用檔案儲存（權限 600） |
 | 相機擷取 | 已有 | `image_picker` 在 Linux 不支援相機，改用 GStreamer / V4L2、`rpicam-still` |
 | 秤重 | 已有 | 自動讀取秤的數值（USB HID 秤、序列埠秤或 HX711 load cell），餐前餐後各一次，隨照片上傳 |
 | 拍照品質檢查 | 已有 | 純 CPU：過暗、過亮、模糊（Laplacian 變異數）、餐盒不在畫面 → 提示重拍 |
 | 壓縮 | 已有 | 長邊 1280、JPEG 品質 80 |
 | 上傳欄位 | 已有 | `weight_g`、`client_record_id`（見 §6.4） |
-| 推播 | 已有 | `ws/machine/` 收到 `data_changed` 立刻重抓，見 §6.6 |
+| 推播 | 已有 | `api/machine/ws/` 收到 `data_changed` 立刻重抓，見 §6.6 |
 | 自動更新 | 已有 | 每次 push 到 `main` 由 CI 發佈；新版啟動失敗時自動退回上一版（`deploy/README.md` §5） |
 
 ### 5.2 硬體
@@ -107,7 +107,8 @@
 | `GET api/machine/beds/` | `LTCPatient`：`bed_id = "{room}-{bed}"`，`patient_id = LTCPatient.id`。選填 `?room_id=` 只回該房 |
 | `GET api/machine/meals/` | **當天**的菜色：循環模式依 `day_cycle`，開放模式依 `serve_date`。時段來自 `SystemSettings.lunch_*/dinner_*` |
 | `POST api/machine/records/` | 建立 `FoodIntake`，見 §6.4 |
-| `WS ws/machine/` | 推播：`LTCPatient` / `SystemSettings` / `Meal` 一變動，server 送 `data_changed`，機台立刻重抓（README §4.7；server 端 `devices/consumers.py`、`devices/events.py`） |
+| `GET api/machine/health/` | 健康檢查（不需認證）：`status`、`server_time`、`api_version`；機台用來測試連線與檢查時鐘誤差（README §4.0） |
+| `WS api/machine/ws/` | 推播：`LTCPatient` / `SystemSettings` / `Meal` 一變動，server 送 `data_changed`，機台立刻重抓（README §4.7；server 端 `devices/consumers.py`、`devices/events.py`） |
 
 所有回應用 `{ "success": true, "data": {...} }` / `{ "success": false, "error": { "code", "message" } }`。`error.message` 會直接顯示在機台螢幕，用中文。
 
@@ -122,32 +123,34 @@
 | 情況 | 狀態碼 | 機台行為 |
 |---|---|---|
 | 成功 | 200 | 標記已同步 |
-| 資料有錯（床位不存在、`patient_id` 與床位不符、圖片格式錯） | **422** | 顯示錯誤，**不重試** |
+| 資料有錯（床位不存在、圖片格式錯） | **422** | 顯示錯誤，**不重試** |
+| `bed_id` 與 `patient_id` 不一致但 `patient_id` 是有效住民 | 200 | 以 `patient_id` 為準收下，回應帶 `bed_mismatch: true` |
 | token 失效 | 401 | 重新配對 |
+| 限流 | 429（`Retry-After`） | 依 `Retry-After` 稍後重試 |
 | 暫時性問題（資料庫忙、磁碟滿） | **5xx** | 進佇列重試 |
 
-**只有暫時性問題才回 5xx**，否則錯誤資料會被無限重送。
+錯誤信封一律帶 `retryable`，機台以它為準；Cloudflare 等代理回的 HTML（登入頁、WAF 403、502/530）機台一律視為可重試，不會把紀錄標成永久失敗。**只有暫時性問題才回 5xx**，否則錯誤資料會被無限重送。
 
 ### 6.4 `api/machine/records/` 欄位
 
 | 欄位 | 來源 | server 處理 |
 |---|---|---|
 | `image` | 相機 | JPEG/PNG，≤ 5 MB |
-| `bed_id`、`patient_id` | 同步的床位表 | 兩者對不上 → 422 |
+| `bed_id`、`patient_id` | 同步的床位表 | 兩者對不上但 `patient_id` 是有效住民 → 照收，回 `bed_mismatch: true`；住民不存在 → 422 |
 | `meal_id`、`meal_time_slot` | 同步的今日菜單 | 菜色沒排給這位住民 → **照收，標記 `assignment_mismatch=True`**，不拒絕（現場照片拒了就沒了） |
 | `before_after` | 操作者選 | `before` → `meal_phase='前'`，`after` → `'後'` |
-| `capture_time` | 機台時鐘，Unix 秒 | 存入新欄位 `captured_at`；`recorded_at` 仍是 server 收到的時間 |
+| `capture_time` | 快門時間（機台時鐘），Unix 秒 | 存入新欄位 `captured_at`；`recorded_at` 仍是 server 收到的時間 |
 | `device_id` | 配對時產生 | 對應 `Device` |
 | **`weight_g`** | 秤 | 存入既有的 `FoodIntake.weight_g` |
 | **`client_record_id`** | App 的 `localId`（UUID） | **去重鍵**：同一 `client_record_id` 再送一次 → 回原本的 `record_id`，不新增 |
 
-回應：`record_id`、`ai_status: "pending"`、`ai_result: null`。機台不等 AI 結果，結果在網頁看。
+回應：`record_id`、`duplicate`、`assignment_mismatch`、`bed_mismatch`、`ai_status: "pending"`、`ai_result: null`。機台不等 AI 結果，結果在網頁看；兩個 mismatch 旗標會寫 log 並在紀錄詳情顯示標籤。同一住民同一餐同一天的餐後照會等餐前照上傳後才送。
 
 ### 6.5 預留欄位
 
 `edge_result`（JSON，選填）：日後若機台跑即時檢查，結果放這裡。server 現在只存不處理。
 
-### 6.6 推播 `ws/machine/`
+### 6.6 推播 `api/machine/ws/`（舊路徑 `ws/machine/` 只剩區網可用）
 
 已配對的機台保持一條 WebSocket（`BASE_URL` 的 `http`/`https` 對應 `ws`/`wss`，Bearer token 認證）。server 的住民、用膳時段或菜單一變動就送 `{ "event": "data_changed", "datasets": [...] }`，機台合併 1.5 秒內的事件後只重抓列出的資料；連線建立時三份資料全部重抓。token 無效以 close code 4401 關閉，機台視同 401。沒有這條連線時機台退回 30 分鐘定時同步，所以 server 可以晚點再做。訊息格式見 `README.md` §4.7。
 

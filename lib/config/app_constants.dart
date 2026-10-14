@@ -10,12 +10,24 @@ class AppConstants {
   static const String mealDataPath = 'api/machine/meals/';
   static const String mealRecordPath = 'api/machine/records/';
 
+  /// 健康檢查 (不需認證):回 `status`、`server_time`、`api_version`。
+  /// 舊版 server 沒有這支 (404) 時退回「有任何 HTTP 回應就算可達」。
+  static const String healthPath = 'api/machine/health/';
+
   /// server 推播通道 (ARCHITECTURE.md §6.6);協定由 BASE_URL 的 http/https 對應成 ws/wss。
-  static const String machineEventsPath = 'ws/machine/';
+  /// 放在 `api/` 底下,經 Cloudflare 公開網址也能連 (舊的 `ws/machine/` 只剩區網能用)。
+  static const String machineEventsPath = 'api/machine/ws/';
 
   static const Duration requestTimeout = Duration(seconds: 15);
   static const Duration uploadTimeout = Duration(seconds: 60);
   static const Duration healthCheckTimeout = Duration(seconds: 5);
+
+  /// 機台時間與 server_time 相差超過這個值就在設定 / 狀態畫面警告
+  /// (capture_time 與 token 期限都靠機台時鐘)。
+  static const Duration clockSkewTolerance = Duration(seconds: 120);
+
+  /// 配對被限流 (429 THROTTLED) 且沒有 Retry-After 時,停用配對按鈕的時間。
+  static const Duration pairingThrottleDefault = Duration(seconds: 60);
 
   // --- 快取有效期 (規格 7.3) ---
   static const Duration roomBedCacheTtl = Duration(hours: 1);
@@ -47,6 +59,10 @@ class AppConstants {
     Duration(minutes: 5),
     Duration(minutes: 30),
   ];
+
+  /// 同一住民、同一餐、同一天的餐前照還在佇列時,餐後照延後這麼久再試,
+  /// 讓餐前照先送到 server。
+  static const Duration afterRecordDeferral = Duration(seconds: 5);
 
   /// 舊版重試滿這個次數就放棄;啟動時用來找出被舊版放棄的項目並放回佇列。
   static int get legacyMaxRetryAttempts => retryDelays.length;

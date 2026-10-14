@@ -118,7 +118,26 @@ class RecordService {
       );
     }
 
-    // 4. 在線 → 立即上傳。佇列項目先以 processing 寫入:上傳到一半斷電或當機,
+    // 4. 餐後照:同一住民、同一餐、同一天的餐前照還在佇列 → 先排隊,讓餐前照先到。
+    final blocker = await _queue.pendingBeforeFor({
+      ...upload.toJson(),
+      'local_id': record.localId,
+    });
+    if (blocker != null) {
+      await _queue.enqueueMealRecord(
+        localId: record.localId,
+        upload: upload,
+        record: record,
+        nextAttemptAt: OfflineQueueService.deferredAttemptAt(blocker),
+      );
+      return UploadOutcome(
+        record,
+        UploadOutcomeStatus.queued,
+        '餐前照片尚未上傳,餐後照片將在其後自動上傳',
+      );
+    }
+
+    // 5. 在線 → 立即上傳。佇列項目先以 processing 寫入:上傳到一半斷電或當機,
     //    下次啟動會把它放回佇列補傳 (server 以 client_record_id 去重)。
     final item = await _queue.enqueueMealRecord(
       localId: record.localId,
@@ -190,9 +209,18 @@ class RecordService {
       syncStatus: SyncStatus.synced,
       updatedAt: nowUnix(),
       clearError: true,
+      serverFlags: [
+        if (result.bedMismatch) LocalMealRecord.flagBedMismatch,
+        if (result.assignmentMismatch) LocalMealRecord.flagAssignmentMismatch,
+      ],
     );
     await _storage.saveRecord(updated);
-    Log.i('record ${record.localId} synced as ${result.recordId}');
+    Log.i(
+      'record ${record.localId} synced as ${result.recordId}'
+      '${result.duplicate ? ' (duplicate)' : ''}'
+      '${result.bedMismatch ? ' [bed_mismatch]' : ''}'
+      '${result.assignmentMismatch ? ' [assignment_mismatch]' : ''}',
+    );
     return updated;
   }
 

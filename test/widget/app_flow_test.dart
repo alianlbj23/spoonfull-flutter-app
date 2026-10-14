@@ -61,7 +61,7 @@ void main() {
     await tester.tap(find.byKey(const Key('save-settings')));
     await tester.pumpAndSettle();
     expect(find.text('*伺服器位址'), findsOneWidget);
-    expect(find.text('*埠'), findsOneWidget);
+    expect(find.text('埠 (選填)'), findsOneWidget, reason: '埠可省略,不是必填');
     expect(find.text('*場域'), findsOneWidget);
 
     // 填寫設定;埠使用數字鍵盤
@@ -71,6 +71,7 @@ void main() {
     await tester.pumpAndSettle();
     await _enterOnKeypad(tester, '8080');
     expect(find.text('8080'), findsOneWidget);
+    expect(find.text('將連線到 http://10.0.0.5:8080/'), findsOneWidget);
     await tester.tap(find.byKey(const Key('save-settings')));
     await tester.pumpAndSettle();
 

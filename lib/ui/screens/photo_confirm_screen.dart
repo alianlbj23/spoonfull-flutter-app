@@ -48,6 +48,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
   MealData? _meal;
   String? _error;
   late String _imagePath;
+  DateTime? _capturedAt;
   late ImageQualityReport _quality;
   double? _weightG;
   WeightSource _weightSource = WeightSource.none;
@@ -63,7 +64,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
     super.initState();
     _records = context.read<RecordState>()..confirmingCapture = true;
     _slot = _records.currentTimeSlot();
-    _meal = _records.defaultMealFor(_slot);
+    _meal = _records.defaultMealFor(_slot, patientId: widget.bed.patientId);
     _applyCapture(widget.capture);
   }
 
@@ -75,6 +76,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
 
   void _applyCapture(CaptureResult c) {
     _imagePath = c.imagePath;
+    _capturedAt = c.capturedAt;
     _quality = c.quality;
     final w = c.weight;
     if (w != null) {
@@ -189,6 +191,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
         slot: _slot!,
         phase: widget.phase,
         imagePath: _imagePath,
+        captureTime: _capturedAt,
         weightG: _weightG,
         weightSource: _weightSource,
         quality: _quality,
@@ -328,7 +331,10 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
                                   selected: s.timeSlotId == _slot?.timeSlotId,
                                   onTap: () => setState(() {
                                     _slot = s;
-                                    _meal = state.defaultMealFor(s);
+                                    _meal = state.defaultMealFor(
+                                      s,
+                                      patientId: bed.patientId,
+                                    );
                                   }),
                                 ),
                             ],
@@ -339,7 +345,10 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
                             spacing: 8,
                             runSpacing: 8,
                             children: [
-                              for (final m in state.meals)
+                              for (final m in state.mealsFor(
+                                _slot,
+                                patientId: bed.patientId,
+                              ))
                                 _Chip(
                                   label: m.mealName,
                                   selected: m.mealId == _meal?.mealId,

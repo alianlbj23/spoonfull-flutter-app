@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:sqflite/sqflite.dart';
 
+import '../core/utils/time_utils.dart';
 import '../data/local/app_database.dart';
 import '../data/local/preferences_storage.dart';
 import '../data/local/secure_token_storage.dart';
@@ -142,8 +143,11 @@ class LocalStorageService {
   Future<void> saveMeals(
     String placeId,
     List<MealData> meals,
-    List<TimeSlot> slots,
-  ) async {
+    List<TimeSlot> slots, {
+    String? currentSlot,
+    int? currentSlotAt,
+  }) async {
+    await _prefs.writeCurrentSlot(currentSlot, currentSlotAt ?? nowUnix());
     await _db.transaction((txn) async {
       await txn.delete('meals', where: 'place_id = ?', whereArgs: [placeId]);
       await txn.delete(
@@ -162,6 +166,9 @@ class LocalStorageService {
     });
     _changed(datasetMeals);
   }
+
+  /// 最近一次 meals 回應的 `current_slot` 與收到時間 (機台 unix 秒)。
+  (String?, int?) get currentSlotHint => _prefs.readCurrentSlot();
 
   Future<List<MealData>> getMeals(String placeId) async {
     final rows = await _db.query(

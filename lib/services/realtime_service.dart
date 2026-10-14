@@ -61,7 +61,8 @@ Future<RealtimeChannel> ioConnector(
   return _IoChannel(socket);
 }
 
-/// server 推播通道 `ws/machine/` (ARCHITECTURE.md §6.6)。
+/// server 推播通道 `api/machine/ws/` (ARCHITECTURE.md §6.6;舊路徑 `ws/machine/`
+/// 經 Cloudflare 公開網址會被擋,只剩區網能用)。
 ///
 /// 已配對時維持一條 WebSocket;server 的住民、用餐時段或菜單一變動就送
 /// `data_changed`,由 [SyncService] 立刻重抓對應資料。斷線依

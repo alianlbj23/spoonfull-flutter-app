@@ -124,7 +124,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('RealtimeService', () {
-    test('connects to ws/machine/ with the bearer token', () async {
+    test('connects to api/machine/ws/ with the bearer token', () async {
       final connector = FakeConnector();
       final service = _service(connector);
       service.start();
@@ -133,6 +133,11 @@ void main() {
       expect(
         connector.uris.single.toString(),
         'wss://server.local:8443/app/${AppConstants.machineEventsPath}',
+      );
+      // 舊路徑 ws/machine/ 經 Cloudflare 會被擋。
+      expect(
+        connector.uris.single.toString(),
+        'wss://server.local:8443/app/api/machine/ws/',
       );
       expect(connector.headers.single, {'Authorization': 'Bearer tok'});
       await service.dispose();

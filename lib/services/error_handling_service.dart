@@ -36,5 +36,23 @@ class ErrorHandlingService {
     };
   }
 
+  /// 配對失敗的提示:server 回的 `error.message` (THROTTLED、INVALID_PAIRING_CODE、
+  /// DEVICE_DISABLED 等) 原樣顯示,不加「請求參數錯誤:」之類的前綴。
+  String pairingMessage(Object error) {
+    final e = normalize(error);
+    final fromServer =
+        e.code != null &&
+        e.message.isNotEmpty &&
+        (e.type == AppErrorType.client ||
+            e.type == AppErrorType.validation ||
+            e.type == AppErrorType.forbidden ||
+            e.type == AppErrorType.unauthorized);
+    if (fromServer) return e.message;
+    if (e.type == AppErrorType.client && e.statusCode == 429) {
+      return '嘗試太多次,請稍後再試';
+    }
+    return userMessage(e);
+  }
+
   void dispose() => _unauthorized.close();
 }

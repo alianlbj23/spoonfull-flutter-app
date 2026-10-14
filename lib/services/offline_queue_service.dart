@@ -26,6 +26,7 @@ class OfflineQueueService {
     bool immediate = false,
     LocalMealRecord? record,
     QueueStatus status = QueueStatus.pending,
+    int? nextAttemptAt,
   }) async {
     final now = nowUnix();
     final item = OfflineQueueItem(
@@ -37,9 +38,9 @@ class OfflineQueueService {
       status: status,
       createdAt: now,
       updatedAt: now,
-      nextAttemptAt: immediate
-          ? now
-          : now + AppConstants.retryDelays.first.inSeconds,
+      nextAttemptAt:
+          nextAttemptAt ??
+          (immediate ? now : now + AppConstants.retryDelays.first.inSeconds),
     );
     if (record == null) {
       await _storage.saveQueueItem(item);
@@ -78,9 +79,10 @@ class OfflineQueueService {
   Future<void> markCompleted(OfflineQueueItem item) =>
       _storage.deleteQueueItem(item.queueId);
 
-  /// 失敗:暫時性錯誤 (網路 / 逾時 / 5xx) 與 401 依退避表一直重試,退避到表尾後
-  /// 固定用最後一格;只有不可重試的錯誤 (4xx / 422 等) 才標記 failed。
-  /// server 停機再久,恢復後都會自動補傳,不需要人工逐筆重送。
+  /// 失敗:暫時性錯誤 (網路 / 逾時 / 5xx / 代理回的 HTML) 與 401 依退避表一直重試,
+  /// 退避到表尾後固定用最後一格;只有不可重試的錯誤 (server 自己回的 4xx 錯誤信封,
+  /// 或 server 明講 `retryable: false`) 才標記 failed。server 停機再久,恢復後都會
+  /// 自動補傳,不需要人工逐筆重送。有 `Retry-After` 時下次至少等那麼久。
   Future<OfflineQueueItem> markFailed(
     OfflineQueueItem item,
     AppException error,
@@ -90,17 +92,86 @@ class OfflineQueueService {
     final delays = AppConstants.retryDelays;
     final giveUp =
         !error.isRetryable && error.type != AppErrorType.unauthorized;
+    var delay = delays[attempts.clamp(0, delays.length - 1)].inSeconds;
+    final retryAfter = error.retryAfter?.inSeconds;
+    if (retryAfter != null && retryAfter > delay) delay = retryAfter;
     final updated = item.copyWith(
       status: giveUp ? QueueStatus.failed : QueueStatus.pending,
       attempts: attempts,
       updatedAt: now,
       errorMessage: error.message,
-      nextAttemptAt: giveUp
-          ? item.nextAttemptAt
-          : now + delays[attempts.clamp(0, delays.length - 1)].inSeconds,
+      nextAttemptAt: giveUp ? item.nextAttemptAt : now + delay,
     );
     await _storage.saveQueueItem(updated);
     return updated;
+  }
+
+  /// 延後一筆項目而不算失敗 (例如餐後照要等餐前照先上傳)。
+  Future<OfflineQueueItem> defer(
+    OfflineQueueItem item,
+    int nextAttemptAt,
+  ) async {
+    final updated = item.copyWith(
+      status: QueueStatus.pending,
+      updatedAt: nowUnix(),
+      nextAttemptAt: nextAttemptAt,
+    );
+    await _storage.saveQueueItem(updated);
+    return updated;
+  }
+
+  /// 所有待上傳項目改成立即可上傳 (重新配對成功後,不必等退避)。回傳筆數。
+  Future<int> rescheduleAllNow({int? now}) async {
+    final t = now ?? nowUnix();
+    final items = await pendingItems();
+    for (final i in items) {
+      if (i.nextAttemptAt <= t) continue;
+      await _storage.saveQueueItem(i.copyWith(nextAttemptAt: t, updatedAt: t));
+    }
+    return items.length;
+  }
+
+  /// [requestData] 若是餐後紀錄,找出同一住民、同一時段、同一天 (機台當地日期)
+  /// 還在佇列 (pending / processing) 的餐前紀錄;沒有則回 null。
+  Future<OfflineQueueItem?> pendingBeforeFor(
+    Map<String, Object?> requestData, {
+    String? excludeQueueId,
+  }) async {
+    if (requestData['before_after'] != 'after') return null;
+    final patient = requestData['patient_id'];
+    final slot = requestData['meal_time_slot'];
+    final day = _localDay(requestData['capture_time']);
+    final localId = requestData['local_id'];
+    for (final i in await _storage.getQueueItems()) {
+      if (i.status != QueueStatus.pending &&
+          i.status != QueueStatus.processing) {
+        continue;
+      }
+      if (i.queueId == excludeQueueId) continue;
+      final d = i.requestData;
+      if (d['before_after'] != 'before') continue;
+      if (localId != null && d['local_id'] == localId) continue;
+      if (d['patient_id'] != patient || d['meal_time_slot'] != slot) continue;
+      if (_localDay(d['capture_time']) != day) continue;
+      return i;
+    }
+    return null;
+  }
+
+  static int? _localDay(Object? captureTime) {
+    final t = captureTime is int ? captureTime : int.tryParse('$captureTime');
+    if (t == null) return null;
+    final d = DateTime.fromMillisecondsSinceEpoch(t * 1000);
+    return d.year * 10000 + d.month * 100 + d.day;
+  }
+
+  /// 餐後項目被 [blocker] (餐前) 擋住時的下次嘗試時間:稍等一下,
+  /// 若餐前還在退避就排在它之後。
+  static int deferredAttemptAt(OfflineQueueItem? blocker, {int? now}) {
+    final soon =
+        (now ?? nowUnix()) + AppConstants.afterRecordDeferral.inSeconds;
+    final after = (blocker?.nextAttemptAt ?? 0) + 1;
+    return after > soon ? after : soon;
   }
 
   /// 使用者手動重試失敗項目 (規格 6.3)。

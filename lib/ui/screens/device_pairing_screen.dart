@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -22,6 +24,40 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
   /// 有固定配對碼時預先填入,按確認即可。
   String _code = AppConfig.autoPairingCode;
   bool _error = false;
+
+  /// 被限流時每秒更新倒數。
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    // 剛被限流後重新進入此畫面,倒數照樣進行。
+    _syncTicker(context.read<DeviceState>().pairingCooldown());
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  /// 有倒數時每秒重畫一次,倒數結束就停。
+  void _syncTicker(Duration? cooldown) {
+    if (cooldown == null) {
+      _ticker?.cancel();
+      _ticker = null;
+      return;
+    }
+    _ticker ??= Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      final left = context.read<DeviceState>().pairingCooldown();
+      setState(() {});
+      if (left == null) {
+        _ticker?.cancel();
+        _ticker = null;
+      }
+    });
+  }
 
   Future<void> _editCode() async {
     final value = await showNumericKeypad(
@@ -48,6 +84,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
       navigator.popUntil((r) => r.isFirst);
     } else {
       setState(() => _error = true);
+      _syncTicker(device.pairingCooldown());
     }
   }
 
@@ -57,6 +94,10 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
     final pairing = device.status == PairingStatus.pairing;
     final color = _error ? AppColors.error : AppColors.navy;
     final message = device.pairingError;
+    final cooldown = device.pairingCooldown();
+    final waitSeconds = cooldown == null
+        ? 0
+        : (cooldown.inMilliseconds / 1000).ceil();
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -117,11 +158,11 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
             top: 391,
             child: PrimaryButton(
               key: const Key('pairing-confirm'),
-              label: '確認',
+              label: waitSeconds > 0 ? '$waitSeconds 秒' : '確認',
               width: 220,
               height: 90,
               loading: pairing,
-              onPressed: _code.isEmpty ? null : _confirm,
+              onPressed: _code.isEmpty || waitSeconds > 0 ? null : _confirm,
             ),
           ),
         ],

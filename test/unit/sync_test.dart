@@ -21,9 +21,13 @@ class FlakyApi extends MockApiRepository {
   final List<AppException> uploadErrors = [];
   int uploads = 0;
 
+  /// 每次上傳的 before_after,依呼叫順序。
+  final List<String> phases = [];
+
   @override
   Future<MealRecordResult> uploadMealRecord(MealRecordUpload upload) async {
     uploads++;
+    phases.add(upload.beforeAfter);
     if (uploadErrors.isNotEmpty) throw uploadErrors.removeAt(0);
     return super.uploadMealRecord(upload);
   }
@@ -65,7 +69,10 @@ void main() {
     await tmp.delete(recursive: true);
   });
 
-  Future<UploadOutcome> createRecord(String imagePath) async {
+  Future<UploadOutcome> createRecord(
+    String imagePath, {
+    MealPhase phase = MealPhase.after,
+  }) async {
     final storage = env.services.storage;
     final beds = await storage.getBeds('demo', roomId: 'R101');
     final bed = beds.firstWhere((b) => b.hasPatient);
@@ -77,10 +84,17 @@ void main() {
       meal: meals.first,
       meals: meals,
       timeSlot: slots.first,
-      phase: MealPhase.after,
+      phase: phase,
       imagePath: imagePath,
       deviceId: storage.deviceConfig.deviceId,
     );
+  }
+
+  /// 讓佇列裡所有項目立即到期。
+  Future<void> makeAllDue() async {
+    for (final i in await env.services.queue.pendingItems()) {
+      await env.services.storage.saveQueueItem(i.copyWith(nextAttemptAt: 0));
+    }
   }
 
   test('pairing stores token and marks device paired', () async {
@@ -314,7 +328,8 @@ void main() {
     final errors = env.services.errors;
     final e = errors.normalize(const FileSystemException('boom', '/x'));
     expect(e.type, AppErrorType.unknown);
-    expect(e.isRetryable, isFalse);
+    // 非預期的 I/O 錯誤可能只是暫時的,紀錄留在佇列重試,不標成永久失敗。
+    expect(e.isRetryable, isTrue);
     expect(errors.userMessage(e), isNot(contains('FileSystemException')));
   });
 
@@ -370,5 +385,187 @@ void main() {
     expect(File(pendingOld).existsSync(), isTrue, reason: '未上傳的不能刪');
     expect(File(fresh).existsSync(), isTrue);
     expect(File(orphan).existsSync(), isFalse);
+  });
+
+  test('Retry-After is the minimum next delay', () async {
+    final queue = env.services.queue;
+    final now = nowUnix();
+    final item = OfflineQueueItem(
+      queueId: 'ra',
+      operationType: QueueOperation.uploadMealRecord,
+      endpoint: AppConstants.mealRecordPath,
+      requestData: const {'local_id': 'x'},
+      createdAt: now,
+      updatedAt: now,
+    );
+    final updated = await queue.markFailed(
+      item,
+      const AppException(
+        AppErrorType.client,
+        'slow down',
+        statusCode: 429,
+        retryAfter: Duration(minutes: 10),
+      ),
+    );
+    expect(updated.status, QueueStatus.pending, reason: '429 可重試');
+    expect(updated.nextAttemptAt - nowUnix(), closeTo(600, 1));
+  });
+
+  test('a proxy HTML response never marks the record failed', () async {
+    // 例如 Cloudflare WAF 的 403 HTML:ApiClient 轉成可重試的 parse 錯誤。
+    api.uploadErrors.add(
+      const AppException(
+        AppErrorType.parse,
+        '伺服器回應異常 (HTTP 403)',
+        statusCode: 403,
+        retryable: true,
+      ),
+    );
+    final path = await _writePng(tmp, 640, 480);
+    final outcome = await createRecord(path);
+    expect(outcome.status, UploadOutcomeStatus.queued);
+    api.uploadErrors.add(
+      const AppException(
+        AppErrorType.server,
+        '伺服器故障',
+        statusCode: 530,
+        retryable: true,
+      ),
+    );
+    await makeAllDue();
+    await env.services.sync.processQueue();
+    final saved = await env.services.storage.getRecord(outcome.record.localId);
+    expect(saved!.syncStatus, SyncStatus.pending);
+    expect(
+      (await env.services.queue.pendingItems()).single.status,
+      QueueStatus.pending,
+    );
+
+    await makeAllDue();
+    await env.services.sync.processQueue();
+    final synced = await env.services.storage.getRecord(outcome.record.localId);
+    expect(synced!.syncStatus, SyncStatus.synced);
+  });
+
+  test('server retryable:false fails the record for good', () async {
+    api.uploadErrors.add(
+      const AppException(
+        AppErrorType.server,
+        'bad image',
+        code: 'INVALID_IMAGE',
+        statusCode: 500,
+        retryable: false,
+      ),
+    );
+    final path = await _writePng(tmp, 640, 480);
+    final outcome = await createRecord(path);
+    expect(outcome.status, UploadOutcomeStatus.failed);
+  });
+
+  test(
+    'after-photo waits until the before-photo of the same meal is up',
+    () async {
+      // 餐前上傳失敗 (留在佇列退避),接著拍餐後:餐後不能搶先送出。
+      api.uploadErrors.add(_network);
+      final before = await createRecord(
+        await _writePng(tmp, 640, 480),
+        phase: MealPhase.before,
+      );
+      expect(before.status, UploadOutcomeStatus.queued);
+      final after = await createRecord(await _writePng(tmp, 640, 480));
+      expect(after.status, UploadOutcomeStatus.queued, reason: '餐前還沒上傳');
+      expect(after.message, contains('餐前'));
+      expect(api.phases, ['before'], reason: '餐後沒有直接上傳');
+
+      // 兩筆都到期:FIFO 先送餐前,餐後隨後。
+      await makeAllDue();
+      await env.services.sync.processQueue();
+      expect(api.phases, ['before', 'before', 'after']);
+      expect(
+        (await env.services.storage.getRecord(after.record.localId))!
+            .syncStatus,
+        SyncStatus.synced,
+      );
+    },
+  );
+
+  test(
+    'after-photo is deferred while its before-photo is still pending',
+    () async {
+      final storage = env.services.storage;
+      final queue = env.services.queue;
+      final now = nowUnix();
+      LocalMealRecord rec(String id, MealPhase phase, String path) =>
+          LocalMealRecord(
+            localId: id,
+            bedId: 'R101-B1',
+            patientId: 'P1',
+            mealId: 'M1',
+            mealTimeSlot: 'T1',
+            beforeAfter: phase,
+            imagePath: path,
+            captureTime: now,
+            createdAt: now,
+            updatedAt: now,
+          );
+      final b = rec('b', MealPhase.before, await _writePng(tmp, 640, 480));
+      final a = rec('a', MealPhase.after, await _writePng(tmp, 640, 480));
+      // 餐後先建立 (FIFO 排在前面),餐前還在退避中 (尚未到期)。
+      await queue.enqueueMealRecord(
+        localId: 'a',
+        upload: env.services.records.uploadFor(a, 'dev'),
+        record: a,
+        immediate: true,
+      );
+      await queue.enqueueMealRecord(
+        localId: 'b',
+        upload: env.services.records.uploadFor(b, 'dev'),
+        record: b,
+        nextAttemptAt: now + 100,
+      );
+
+      await env.services.sync.processQueue();
+      expect(api.uploads, 0, reason: '餐後要等餐前');
+      final deferred = (await queue.pendingItems()).firstWhere(
+        (i) => i.requestData['local_id'] == 'a',
+      );
+      expect(deferred.attempts, 0, reason: '延後不算失敗');
+      expect(deferred.nextAttemptAt, greaterThan(now + 100));
+      expect((await storage.getRecord('a'))!.syncStatus, SyncStatus.pending);
+
+      // 不同住民或不同天的餐前不會擋。
+      final other = await queue.pendingBeforeFor({
+        ...env.services.records.uploadFor(a, 'dev').toJson(),
+        'patient_id': 'P2',
+      });
+      expect(other, isNull);
+      final nextDay = await queue.pendingBeforeFor({
+        ...env.services.records.uploadFor(a, 'dev').toJson(),
+        'capture_time': now + 2 * 86400,
+      });
+      expect(nextDay, isNull);
+    },
+  );
+
+  test('re-pairing makes every waiting item due and syncs', () async {
+    api.uploadErrors.add(
+      const AppException(AppErrorType.unauthorized, 'expired', statusCode: 401),
+    );
+    final outcome = await createRecord(await _writePng(tmp, 640, 480));
+    expect(outcome.status, UploadOutcomeStatus.queued);
+    final waiting = (await env.services.queue.pendingItems()).single;
+    await env.services.storage.saveQueueItem(
+      waiting.copyWith(nextAttemptAt: nowUnix() + 1800),
+    );
+
+    await env.services.pairing.pair(MockApiRepository.validPairingCode);
+    await env.services.sync.afterPaired();
+
+    expect(await env.services.queue.pendingItems(), isEmpty);
+    expect(
+      (await env.services.storage.getRecord(outcome.record.localId))!
+          .syncStatus,
+      SyncStatus.synced,
+    );
   });
 }
