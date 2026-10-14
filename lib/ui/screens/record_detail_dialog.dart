@@ -30,9 +30,8 @@ class RecordDetailDialog extends StatelessWidget {
       SyncStatus.pending => ('等待上傳', AppColors.orangeText),
       SyncStatus.failed => ('上傳失敗', AppColors.error),
     };
-    final time = DateFormat(
-      'yyyy/MM/dd HH:mm',
-    ).format(fromUnix(record.captureTime));
+    final time = DateFormat('yyyy/MM/dd HH:mm')
+        .format(fromUnix(record.captureTime));
 
     return Dialog(
       backgroundColor: Colors.white,
@@ -75,7 +74,7 @@ class RecordDetailDialog extends StatelessWidget {
                       _kv(
                         '整盤重量',
                         '${record.weightG!.toStringAsFixed(0)} g'
-                        '${record.weightSource == WeightSource.manual ? ' (手動)' : ''}',
+                            '${record.weightSource == WeightSource.manual ? ' (手動)' : ''}',
                       ),
                     if (record.errorMessage != null)
                       _kv('錯誤', record.errorMessage!, color: AppColors.error),
@@ -86,18 +85,7 @@ class RecordDetailDialog extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
                         if (record.syncStatus == SyncStatus.failed) ...[
-                          PrimaryButton(
-                            key: const Key('retry-upload'),
-                            label: '重新上傳',
-                            width: 170,
-                            height: 64,
-                            fontSize: 28,
-                            onPressed: () async {
-                              final navigator = Navigator.of(context);
-                              await context.read<RecordState>().retry(record);
-                              navigator.pop();
-                            },
-                          ),
+                          _RetryButton(record: record),
                           const SizedBox(width: 12),
                         ],
                         PrimaryButton(
@@ -229,5 +217,44 @@ class _Meter extends StatelessWidget {
         ),
       ],
     ),
+  );
+}
+
+/// 「重新上傳」:放回佇列後就關閉對話框,實際上傳在背景進行。
+class _RetryButton extends StatefulWidget {
+  const _RetryButton({required this.record});
+
+  final LocalMealRecord record;
+
+  @override
+  State<_RetryButton> createState() => _RetryButtonState();
+}
+
+class _RetryButtonState extends State<_RetryButton> {
+  bool _busy = false;
+
+  Future<void> _retry() async {
+    final state = context.read<RecordState>();
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() => _busy = true);
+    try {
+      await state.retry(widget.record);
+      navigator.pop();
+    } on Object catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text(state.errorMessage(e))));
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PrimaryButton(
+    key: const Key('retry-upload'),
+    label: '重新上傳',
+    width: 170,
+    height: 64,
+    fontSize: 28,
+    loading: _busy,
+    onPressed: _busy ? null : _retry,
   );
 }

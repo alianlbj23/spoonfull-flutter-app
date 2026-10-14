@@ -15,7 +15,7 @@ class ErrorHandlingService {
   AppException normalize(Object error) {
     if (error is AppException) return error;
     Log.e('Unexpected error', error);
-    return AppException(AppErrorType.parse, error.toString());
+    return AppException(AppErrorType.unknown, error.toString());
   }
 
   /// 規格 6.1 的使用者提示。
@@ -31,6 +31,8 @@ class ErrorHandlingService {
       AppErrorType.validation => '資料驗證失敗:${e.message}',
       AppErrorType.localValidation => e.message,
       AppErrorType.parse => e.message,
+      // 例外原文是給工程師看的,只進 log;畫面顯示固定訊息。
+      AppErrorType.unknown => '發生未預期的錯誤,請再試一次;持續發生請聯絡管理員',
     };
   }
 

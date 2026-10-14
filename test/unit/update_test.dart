@@ -51,6 +51,7 @@ void main() {
     required int latest,
     String? checksum,
     Duration idle = Duration.zero,
+    Duration healthyAfter = Duration.zero,
   }) {
     final manifest = jsonEncode({
       'build': latest,
@@ -78,6 +79,7 @@ void main() {
       restart: () async => restarts++,
       idleBeforeRestart: idle,
       installNotice: Duration.zero,
+      healthyAfter: healthyAfter,
     );
     addTearDown(service.dispose);
     return service;
@@ -168,5 +170,109 @@ void main() {
     expect(updates.enabled, isFalse);
     await updates.check();
     expect(requests, isEmpty);
+  });
+
+  bool exists(String rel) =>
+      FileSystemEntity.typeSync(p.join(installDir.path, rel)) !=
+      FileSystemEntityType.notFound;
+
+  test('old files are kept until the new build is confirmed healthy', () async {
+    final updates = service(current: 5, latest: 6);
+    await updates.check();
+    expect(read('app'), 'new');
+    expect(read('app${UpdateService.oldSuffix}'), 'old');
+    expect(read(UpdateService.pendingMarker), '6');
+
+    // 新版 (另一個程序) 啟動並正常跑完 healthyAfter → 刪掉舊檔
+    final next = service(current: 6, latest: 6);
+    next.confirmHealthy();
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(exists('app${UpdateService.oldSuffix}'), isFalse);
+    expect(exists(UpdateService.pendingMarker), isFalse);
+  });
+
+  test(
+    'a failed install puts the old files back and unblocks the screen',
+    () async {
+      // data/ 底下放一個同名資料夾,讓 data/asset.txt 換不進去
+      File(p.join(installDir.path, 'data', 'asset.txt')).deleteSync();
+      Directory(p.join(installDir.path, 'data', 'asset.txt')).createSync();
+      final updates = service(current: 5, latest: 6);
+      await updates.check();
+
+      expect(restarts, 0);
+      expect(read('app'), 'old', reason: '已換的檔案要換回來');
+      expect(exists('app${UpdateService.oldSuffix}'), isFalse);
+      expect(exists(p.join('lib', 'added.so')), isFalse);
+      expect(exists(UpdateService.inProgressMarker), isFalse);
+      expect(updates.status.value, UpdateStatus.idle, reason: '更新提示不能一直擋住畫面');
+    },
+  );
+
+  test('an interrupted install is rolled back on the next start', () async {
+    // 模擬斷電:舊檔已改名、新檔換到一半、標記還在
+    File(p.join(installDir.path, 'app'))
+        .renameSync(p.join(installDir.path, 'app${UpdateService.oldSuffix}'));
+    File(p.join(installDir.path, 'app')).writeAsStringSync('new');
+    File(p.join(installDir.path, UpdateService.inProgressMarker))
+        .writeAsStringSync('6');
+
+    final updates = service(current: 5, latest: 5);
+    updates.start();
+    await pumpEventQueue();
+    expect(read('app'), 'old');
+    expect(exists(UpdateService.inProgressMarker), isFalse);
+  });
+
+  test('a rolled-back build is not installed again', () async {
+    File(p.join(installDir.path, UpdateService.badBuildMarker))
+        .writeAsStringSync('6');
+    final updates = service(current: 5, latest: 6);
+    await updates.check();
+    expect(restarts, 0);
+    expect(read('app'), 'old');
+    expect(requests, everyElement(endsWith('version.json')));
+  });
+
+  group('spoonfull-recover.sh', () {
+    final script = File('deploy/spoonfull-recover.sh').absolute.path;
+
+    void run() {
+      final r = Process.runSync('sh', [script, installDir.path]);
+      expect(r.exitCode, 0, reason: '${r.stderr}');
+    }
+
+    test('rolls back after the new build fails to start repeatedly', () async {
+      await service(current: 5, latest: 6).check();
+      expect(read('app'), 'new');
+
+      for (var i = 0; i < 3; i++) {
+        run();
+        expect(read('app'), 'new', reason: '前 3 次啟動先給新版機會');
+      }
+      run();
+      expect(read('app'), 'old');
+      expect(read(p.join('data', 'asset.txt')), 'old');
+      expect(read(UpdateService.badBuildMarker), '6');
+      expect(exists(UpdateService.pendingMarker), isFalse);
+      expect(exists(UpdateService.bootCountFile), isFalse);
+    }, skip: Platform.isWindows);
+
+    test('restores old files after an interrupted install', () {
+      File(p.join(installDir.path, 'app'))
+          .renameSync(p.join(installDir.path, 'app${UpdateService.oldSuffix}'));
+      File(p.join(installDir.path, 'app')).writeAsStringSync('half');
+      File(p.join(installDir.path, UpdateService.inProgressMarker))
+          .writeAsStringSync('6');
+      run();
+      expect(read('app'), 'old');
+      expect(exists(UpdateService.inProgressMarker), isFalse);
+    }, skip: Platform.isWindows);
+
+    test('does nothing when there is no pending update', () {
+      run();
+      expect(read('app'), 'old');
+      expect(exists(UpdateService.bootCountFile), isFalse);
+    }, skip: Platform.isWindows);
   });
 }

@@ -221,9 +221,10 @@ class LineScaleReader extends ScaleReader {
       bytes = file.openRead();
     }
     try {
-      await for (final line in bytes
-          .transform(const Utf8Decoder(allowMalformed: true))
-          .transform(const LineSplitter())) {
+      await for (final line
+          in bytes
+              .transform(const Utf8Decoder(allowMalformed: true))
+              .transform(const LineSplitter())) {
         final r = parseLine(line);
         if (r != null) yield r;
       }
@@ -238,8 +239,17 @@ class LineScaleReader extends ScaleReader {
     if (!Platform.isLinux) return;
     try {
       final r = await Process.run('stty', [
-        '-F', device, '$baud', 'raw', '-echo', '-echoe', '-echok', '-hupcl',
-        'cs8', '-cstopb', '-parenb',
+        '-F',
+        device,
+        '$baud',
+        'raw',
+        '-echo',
+        '-echoe',
+        '-echok',
+        '-hupcl',
+        'cs8',
+        '-cstopb',
+        '-parenb',
       ]);
       if (r.exitCode != 0) Log.i('stty failed: ${r.stderr}');
     } catch (e) {
@@ -247,17 +257,25 @@ class LineScaleReader extends ScaleReader {
     }
   }
 
-  static final _number = RegExp(r'[-+]?\d+(?:\.\d+)?');
+  // 數字前面不能緊接英數字:`ERR,HX711 not ready` 的 711 不是重量。
+  static final _number = RegExp(r'(?<![A-Za-z0-9.])[-+]?\d+(?:\.\d+)?');
   static final _unit = RegExp(r'(kg|lb|oz|g)\b', caseSensitive: false);
+  static final _separator = RegExp(r'[,;\s]+');
 
+  /// 解析一行輸出;不是重量的行 (空行、`ERR,...` 等錯誤訊息) 回傳 null。
   static WeightReading? parseLine(String line) {
     final text = line.trim();
     if (text.isEmpty) return null;
+    final upper = text.toUpperCase();
+    if (upper.startsWith('ERR')) return null;
     final m = _number.firstMatch(text);
     if (m == null) return null;
     final value = double.tryParse(m.group(0)!);
     if (value == null) return null;
-    final unit = _unit.firstMatch(text.substring(m.end))?.group(1)?.toLowerCase();
+    final unit = _unit
+        .firstMatch(text.substring(m.end))
+        ?.group(1)
+        ?.toLowerCase();
     final grams = switch (unit) {
       'kg' => value * 1000,
       'lb' => value * 453.59237,
@@ -265,8 +283,9 @@ class LineScaleReader extends ScaleReader {
       _ => value,
     };
     // 只有秤明確說 ST 才算穩定;純數字協定沒有旗標,交給連續讀數判斷。
-    final upper = text.toUpperCase();
-    final stable = upper.contains('ST') && !upper.contains('US');
+    // 以欄位比對,UNSTABLE 這類字串不會被當成 ST。
+    final fields = upper.split(_separator);
+    final stable = fields.contains('ST') && !fields.contains('US');
     return WeightReading(
       grams: grams,
       stable: stable,
@@ -340,9 +359,17 @@ class ScaleService {
       return await completer.future;
     } finally {
       timer.cancel();
-      await sub.cancel();
+      await cancelReading(sub);
     }
   }
+
+  /// 取消讀數訂閱,但不無限等待:hidraw / 序列埠沒有資料時,底層的 read 會一直
+  /// 卡住,cancel 也跟著不返回,拍照的進度對話框就永遠關不掉。
+  static Future<void> cancelReading(StreamSubscription<WeightReading> sub) =>
+      sub.cancel().timeout(
+        const Duration(seconds: 1),
+        onTimeout: () => Log.i('scale: device did not release in time'),
+      );
 
   /// 純函式:最近 [window] 筆的最大最小差 ≤ [toleranceG] → 回傳平均值 (穩定)。
   static WeightReading? detectStable(

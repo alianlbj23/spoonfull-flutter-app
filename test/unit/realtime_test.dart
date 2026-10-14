@@ -50,6 +50,7 @@ class FakeConnector {
   Future<RealtimeChannel> call(Uri uri, Map<String, String> h) async {
     uris.add(uri);
     headers.add(h);
+    // ignore: only_throw_errors
     if (failWith != null) throw failWith!;
     final channel = FakeChannel();
     channels.add(channel);

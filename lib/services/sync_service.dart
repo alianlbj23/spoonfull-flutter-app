@@ -41,22 +41,15 @@ class SyncSnapshot {
 /// 另外接 server 推播 (ARCHITECTURE.md §6.6),資料一變動就立刻重抓。
 class SyncService {
   SyncService({
-    required ApiRepository api,
-    required LocalStorageService storage,
-    required OfflineQueueService queue,
-    required RecordService records,
-    required ConnectivityService connectivity,
-    required ErrorHandlingService errors,
-    required Future<bool> Function() isPaired,
-    RealtimeService? realtime,
-  }) : _api = api,
-       _storage = storage,
-       _queue = queue,
-       _records = records,
-       _connectivity = connectivity,
-       _errors = errors,
-       _isPaired = isPaired,
-       _realtime = realtime {
+    required this._api,
+    required this._storage,
+    required this._queue,
+    required this._records,
+    required this._connectivity,
+    required this._errors,
+    required this._isPaired,
+    this._realtime,
+  }) {
     _realtime?.onUnauthorized = _errors.notifyUnauthorized;
   }
 
@@ -88,13 +81,18 @@ class SyncService {
   bool get realtimeConnected => _realtime?.isConnected ?? false;
 
   Future<void> start() async {
-    await _queue.recoverStuckItems();
+    final revived = await _queue.recoverStuckItems();
+    await _records.reconcileQueue(
+      _storage.deviceConfig.deviceId,
+      revived: revived,
+    );
+    unawaited(_purge());
     _online = await _connectivity.isOnline();
     _connSub = _connectivity.onStatusChange.listen(_onConnectivity);
-    _periodic = Timer.periodic(
-      AppConstants.periodicSyncInterval,
-      (_) => syncAll(forceCache: true),
-    );
+    _periodic = Timer.periodic(AppConstants.periodicSyncInterval, (_) {
+      unawaited(syncAll(forceCache: true));
+      unawaited(_purge());
+    });
     final realtime = _realtime;
     if (realtime != null) {
       _eventSub = realtime.events.listen(_onDataChanged);
@@ -104,6 +102,14 @@ class SyncService {
       if (await _isPaired()) realtime.start();
     }
     await _emit();
+  }
+
+  Future<void> _purge() async {
+    try {
+      await _records.purgeExpired();
+    } on Object catch (e) {
+      Log.e('purge failed', e);
+    }
   }
 
   /// 配對狀態改變:已配對就維持推播連線,解除配對就關掉。
@@ -164,7 +170,8 @@ class SyncService {
   /// 之中列出的;null 代表全部。
   Future<void> refreshCache({bool force = false, Set<String>? datasets}) async {
     if (!_online || !await _isPaired()) return;
-    bool wants(String dataset) => datasets == null || datasets.contains(dataset);
+    bool wants(String dataset) =>
+        datasets == null || datasets.contains(dataset);
     final placeId = _storage.serverSettings.placeId;
     final now = nowUnix();
     _syncing = true;
@@ -277,7 +284,7 @@ class SyncService {
             syncAttempts: record.syncAttempts + 1,
             syncStatus: SyncStatus.pending,
             updatedAt: nowUnix(),
-            errorMessage: e.message,
+            errorMessage: _errors.userMessage(e),
           ),
         );
       }
@@ -295,7 +302,7 @@ class SyncService {
     final next = await _queue.nextDueAt();
     if (next == null) return;
     final delay = Duration(seconds: (next - nowUnix()).clamp(1, 1 << 20));
-    _retryTimer = Timer(delay, processQueue);
+    _retryTimer = Timer(delay, () => unawaited(processQueue()));
   }
 
   Future<void> _emit() async {

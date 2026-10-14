@@ -67,17 +67,21 @@ class ImagePipeline {
       if (await ref.exists()) reference = await ref.readAsBytes();
     }
 
-    final result = useIsolate
-        ? await Isolate.run(() => processBytes(bytes, reference: reference))
-        : processBytes(bytes, reference: reference);
-
-    final out = File(outputPath);
-    await out.parent.create(recursive: true);
-    await out.writeAsBytes(result.jpeg, flush: true);
-    if (deleteSource && sourcePath != outputPath) {
-      try {
-        await source.delete();
-      } catch (_) {}
+    final ProcessedBytes result;
+    try {
+      result = useIsolate
+          ? await Isolate.run(() => processBytes(bytes, reference: reference))
+          : processBytes(bytes, reference: reference);
+      final out = File(outputPath);
+      await out.parent.create(recursive: true);
+      await out.writeAsBytes(result.jpeg, flush: true);
+    } finally {
+      // 解碼失敗也要刪掉原始檔,否則每次失敗都留下一個檔案。
+      if (deleteSource && sourcePath != outputPath) {
+        try {
+          await source.delete();
+        } catch (_) {}
+      }
     }
     return ProcessedCapture(
       path: outputPath,

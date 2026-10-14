@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -9,7 +11,6 @@ import '../../data/models/local_meal_record.dart';
 import '../../data/models/meal_data.dart';
 import '../../data/models/room_data.dart';
 import '../../state/record_state.dart';
-import '../../state/sync_state.dart';
 import '../widgets/buttons.dart';
 import '../widgets/icons.dart';
 import '../widgets/meal_ticket.dart';
@@ -29,7 +30,7 @@ class BedDetailScreen extends StatefulWidget {
 class _BedDetailScreenState extends State<BedDetailScreen> {
   DateTime _day = DateUtils.dateOnly(DateTime.now());
   List<LocalMealRecord> _records = const [];
-  int _lastSyncKey = -1;
+  int _lastVersion = -1;
 
   @override
   void initState() {
@@ -38,6 +39,7 @@ class _BedDetailScreenState extends State<BedDetailScreen> {
   }
 
   Future<void> _load() async {
+    if (!mounted) return;
     final records = await context.read<RecordState>().recordsFor(
       widget.bed.bedId,
       _day,
@@ -68,29 +70,27 @@ class _BedDetailScreenState extends State<BedDetailScreen> {
 
   Future<void> _openRecord(LocalMealRecord? record, String title) async {
     if (record == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('$title 尚無攝影紀錄')),
-      );
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('$title 尚無攝影紀錄')));
       return;
     }
     await showDialog<void>(
       context: context,
       builder: (_) => RecordDetailDialog(record: record, title: title),
     );
-    _load();
+    unawaited(_load());
   }
 
   @override
   Widget build(BuildContext context) {
-    final slots = context.watch<RecordState>().timeSlots;
-    // 同步狀態改變時重新讀取,讓上傳結果即時反映在票券上。
-    final syncKey = context.select<SyncState, int>(
-      (s) => s.pendingCount * 1000 + s.failedCount,
-    );
-    if (_lastSyncKey != -1 && syncKey != _lastSyncKey) {
+    final state = context.watch<RecordState>();
+    final slots = state.timeSlots;
+    // 紀錄有變動 (上傳成功、重試…) 時重新讀取,讓結果即時反映在票券上。
+    final version = state.recordsVersion;
+    if (_lastVersion != -1 && version != _lastVersion) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _load());
     }
-    _lastSyncKey = syncKey;
+    _lastVersion = version;
     final today = DateUtils.dateOnly(DateTime.now());
     final dateLabel = DateFormat('MM/dd').format(_day);
     final headerStyle = AppText.size(
@@ -187,7 +187,9 @@ class _BedDetailScreenState extends State<BedDetailScreen> {
                     separatorBuilder: (_, _) => const SizedBox(width: 22),
                     itemBuilder: (context, i) {
                       final slot = slots[i ~/ 2];
-                      final phase = i.isEven ? MealPhase.before : MealPhase.after;
+                      final phase = i.isEven
+                          ? MealPhase.before
+                          : MealPhase.after;
                       final record = _find(slot, phase);
                       final title =
                           '${slot.inferredMealType.label}${phase.label.substring(1)}';

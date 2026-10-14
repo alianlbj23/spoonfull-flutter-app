@@ -5,19 +5,26 @@
 #   1. 安裝 GStreamer (相機擷取)、v4l-utils、libsecret (token 儲存)、GTK 執行期
 #   2. 開放 /dev/hidraw* (USB HID 秤)、/dev/ttyUSB*、/dev/ttyACM* (序列埠秤) 權限
 #   3. 啟用 NTP 自動校時 (capture_time 要可信)
-#   4. 安裝 kiosk systemd 服務 (開機自動全螢幕啟動 App)
+#   4. 下載最新版 App 到 /opt/spoonfull (已經有就略過),安裝 kiosk systemd 服務
+#      (開機自動全螢幕啟動 App,自動更新失敗時退回上一版)
 #   5. (選用) HX711 GPIO bridge 服務
 #
-# 用法 (在機台上,先把 flutter build linux 的 bundle 複製到 /opt/spoonfull):
-#   sudo ./install-device.sh [--user <登入帳號>] [--hx711]
+# 用法 (在機台上):
+#   sudo ./install-device.sh [--user <登入帳號>] [--hx711] [--skip-download]
+#
+# 預設會從 GitHub Release 下載 CI 編譯的版本,這樣才會自動更新;
+# 自己 flutter build 的版本 (APP_BUILD=0) 不會自動更新,只適合開發。
 set -euo pipefail
 
 APP_USER="${SUDO_USER:-$(id -un)}"
 WITH_HX711=0
+DOWNLOAD=1
+RELEASE_URL="${SPOONFULL_RELEASE_URL:-https://github.com/alianlbj23/spoonfull-flutter-app/releases/latest/download}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --user) APP_USER="$2"; shift 2 ;;
     --hx711) WITH_HX711=1; shift ;;
+    --skip-download) DOWNLOAD=0; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -35,9 +42,9 @@ apt-get update
 apt-get install -y \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
   v4l-utils libsecret-1-0 libjsoncpp25 libgtk-3-0 \
-  systemd-timesyncd python3 || apt-get install -y \
+  systemd-timesyncd python3 curl || apt-get install -y \
   gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  v4l-utils libsecret-1-0 libgtk-3-0 python3
+  v4l-utils libsecret-1-0 libgtk-3-0 python3 curl
 
 if [[ -f /etc/nv_tegra_release ]]; then
   echo "   偵測到 Jetson:CSI 相機請在 App 硬體設定選「Jetson CSI 相機」(nvarguscamerasrc 由 JetPack 提供)"
@@ -54,11 +61,25 @@ udevadm control --reload-rules && udevadm trigger
 echo "== 3/5 NTP 校時"
 timedatectl set-ntp true || true
 
-echo "== 4/5 kiosk 服務"
+echo "== 4/5 App 與 kiosk 服務"
 mkdir -p "$INSTALL_DIR"
-if [[ ! -x "$INSTALL_DIR/spoonfull_flutter_app" ]]; then
-  echo "   注意:$INSTALL_DIR 裡還沒有 App。請把 build/linux/<arch>/release/bundle/* 複製進去。"
+if [[ ! -x "$INSTALL_DIR/spoonfull_flutter_app" && $DOWNLOAD -eq 1 ]]; then
+  case "$(uname -m)" in
+    aarch64|arm64) ARCH=arm64 ;;
+    x86_64|amd64) ARCH=x64 ;;
+    *) echo "   不支援的架構 $(uname -m)" >&2; exit 1 ;;
+  esac
+  echo "   下載 $RELEASE_URL/spoonfull-linux-$ARCH.tar.gz"
+  TMP="$(mktemp -d)"
+  curl -fL --retry 3 -o "$TMP/app.tar.gz" "$RELEASE_URL/spoonfull-linux-$ARCH.tar.gz"
+  tar -xzf "$TMP/app.tar.gz" -C "$TMP"
+  cp -a "$TMP/bundle/." "$INSTALL_DIR/"
+  rm -rf "$TMP"
 fi
+if [[ ! -x "$INSTALL_DIR/spoonfull_flutter_app" ]]; then
+  echo "   注意:$INSTALL_DIR 裡還沒有 App。請把 bundle/* 複製進去 (見 deploy/README.md)。"
+fi
+install -m 755 "$HERE/spoonfull-recover.sh" "$INSTALL_DIR/spoonfull-recover.sh"
 # App 以 $APP_USER 執行,自動更新要能替換這個資料夾裡的檔案 (lib/services/update_service.dart)
 chown -R "$APP_USER" "$INSTALL_DIR"
 sed "s/__USER__/$APP_USER/g" "$HERE/spoonfull-kiosk.service" > /etc/systemd/system/spoonfull-kiosk.service

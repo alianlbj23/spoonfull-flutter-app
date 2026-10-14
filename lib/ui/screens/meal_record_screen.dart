@@ -29,25 +29,38 @@ class MealRecordScreen extends StatelessWidget {
     );
     if (method == null || !context.mounted) return;
 
-    final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
-    try {
-      // 拍照 + 秤重 + 品質檢查 (ARCHITECTURE.md §5.1)
-      final capture = await runCaptureFlow(context, method: method);
+    while (true) {
+      if (!context.mounted) return;
+      final CaptureResult? capture;
+      try {
+        // 拍照 + 秤重 + 品質檢查 (ARCHITECTURE.md §5.1)
+        capture = await runCaptureFlow(context, method: method);
+      } on Object catch (e) {
+        if (!context.mounted) return;
+        // 拍照失敗要讓人看清楚並能直接重試,不是一閃而過的提示。
+        final retry = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => CaptureErrorDialog(message: state.errorMessage(e)),
+        );
+        if (retry != true || !context.mounted) return;
+        continue;
+      }
       if (capture == null) return;
+      final result = capture;
       await navigator.push(
         MaterialPageRoute<void>(
           builder: (_) => PhotoConfirmScreen(
             room: room,
             bed: bed,
             phase: phase,
-            capture: capture,
+            capture: result,
             captureMethod: method,
           ),
         ),
       );
-    } on Object catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text(state.errorMessage(e))));
+      return;
     }
   }
 
@@ -315,4 +328,71 @@ class PlaceMealDialog extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 拍照失敗:顯示原因,可直接重試。
+class CaptureErrorDialog extends StatelessWidget {
+  const CaptureErrorDialog({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+    backgroundColor: Colors.white,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    child: SizedBox(
+      width: 640,
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Image.asset(AppAssets.mascotPixelDizzy, width: 110),
+                const SizedBox(width: 20),
+                Expanded(
+                  child: Text(
+                    '拍照失敗',
+                    style: AppText.size(38, color: AppColors.error),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              message,
+              key: const Key('capture-error'),
+              style: AppText.size(26, color: Colors.black87),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                PrimaryButton(
+                  key: const Key('capture-error-cancel'),
+                  label: '取消',
+                  width: 150,
+                  height: 64,
+                  fontSize: 28,
+                  background: AppColors.periwinkle,
+                  onPressed: () => Navigator.of(context).pop(false),
+                ),
+                const SizedBox(width: 12),
+                PrimaryButton(
+                  key: const Key('capture-error-retry'),
+                  label: '重試',
+                  width: 170,
+                  height: 64,
+                  fontSize: 28,
+                  onPressed: () => Navigator.of(context).pop(true),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }

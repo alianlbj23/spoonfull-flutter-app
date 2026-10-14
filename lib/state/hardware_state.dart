@@ -6,6 +6,7 @@ import '../data/models/hardware_config.dart';
 import '../data/models/weight_reading.dart';
 import '../services/app_services.dart';
 import '../services/hardware/hardware_service.dart';
+import '../services/hardware/scale_service.dart';
 
 /// 硬體設定頁的狀態:設定值、測試拍照結果、即時秤重。
 class HardwareState extends ChangeNotifier {
@@ -32,6 +33,15 @@ class HardwareState extends ChangeNotifier {
   Future<void> testCapture() => _guard(() async {
     lastTest = await _services.hardware.testCapture();
   });
+
+  /// 刪掉上一張測試照片。
+  Future<void> discardTest() async {
+    final test = lastTest;
+    lastTest = null;
+    if (test != null) await _services.records.discardImage(test.imagePath);
+  }
+
+  String errorMessage(Object e) => _services.errors.userMessage(e);
 
   Future<void> captureReference() => _guard(() async {
     await _services.hardware.captureReference();
@@ -65,8 +75,9 @@ class HardwareState extends ChangeNotifier {
   bool get liveWeightRunning => _liveSub != null;
 
   Future<void> stopLiveWeight() async {
-    await _liveSub?.cancel();
+    final sub = _liveSub;
     _liveSub = null;
+    if (sub != null) await ScaleService.cancelReading(sub);
   }
 
   Future<void> _guard(Future<void> Function() op) async {

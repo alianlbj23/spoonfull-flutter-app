@@ -4,7 +4,9 @@ Spoonfull 機台端 App 裝在病房送餐車的觸控螢幕上(Jetson Orin Nano
 
 **機台只做採集**:拍照、秤重、拍照品質檢查、壓縮、離線佇列、上傳。不跑任何 AI(見 [ARCHITECTURE.md](ARCHITECTURE.md) §2、§5)。
 
-這份文件主要寫給**要實作接收器的人**:機台什麼時候發什麼請求、請求長什麼樣、接收器要怎麼回應,都在下面。系統整體架構與 server 端規劃見 [ARCHITECTURE.md](ARCHITECTURE.md);機台硬體(相機、秤)與部署步驟見 [deploy/README.md](deploy/README.md)。若規格與程式碼不一致,以本文件為準(本文件依程式碼實際行為撰寫)。
+這份文件主要寫給**要實作接收器的人**:機台什麼時候發什麼請求、請求長什麼樣、接收器要怎麼回應,都在下面。系統整體架構與 server 端規劃見 [ARCHITECTURE.md](ARCHITECTURE.md);機台硬體(相機、秤)與部署步驟見 [deploy/README.md](deploy/README.md)。
+
+**文件分工**:本文件描述機台與接收器之間的 API 契約,依程式碼的實際行為撰寫,API 細節與程式碼不一致時以本文件為準。[ARCHITECTURE.md](ARCHITECTURE.md) 是整體系統(含 server)的目標設計。[flutter_architecture_spec.md](flutter_architecture_spec.md) 是最早的 PHP 時期規格,已過時,只留作參考。
 
 ---
 
@@ -39,6 +41,25 @@ python tools/send_test_records.py --server http://192.168.0.10:8000 --place demo
 | `USE_MOCK_API` | `true` / 不設 | `true` 時使用 [mock_api_repository.dart](lib/data/api/mock_api_repository.dart),不發任何 HTTP 請求 |
 | `APP_ENV` | `dev`(預設)/ `test` / `prod` | 只影響 log 等級 |
 | `PAIRING_CODE` | 6 位數字 / 不設 | **測試用固定配對碼**。有設時,儲存伺服器設定後、每次啟動未配對時、以及收到 401 後,App 自動用這組碼配對,不跳鍵盤;server 端需在測試環境接受同一組碼。正式部署不要設 |
+| `APP_BUILD` | 整數 / 不設 (0) | 版本編號,CI 帶入 GitHub Actions 的 run number。0 代表本機編譯,**不會自動更新**。設定頁的「系統狀態」會顯示 |
+| `UPDATE_BASE_URL` | URL / 不設 | 自動更新的下載位置,底下要有 `version.json` 與各平台安裝檔。預設是本 repo 的 GitHub Release `latest` |
+
+**支援的平台**:Linux (arm64 / x64) 與 Windows,由 CI 編譯。`macos/` 可當開發機用。`android/`、`ios/`、`web/` 是 `flutter create` 產生的範本,沒有設定相機權限、CI 也不編譯,目前不支援。
+
+### 1.1 測試
+
+```bash
+flutter analyze
+flutter test
+```
+
+CI ([.github/workflows/build.yml](.github/workflows/build.yml)) 在每個 PR 與每次 push 到 `main` 時都會先跑這兩項,沒過就不會編譯。測試不需要硬體或網路:用記憶體 SQLite、Mock API、模擬相機與模擬秤 ([test/helpers/test_services.dart](test/helpers/test_services.dart))。
+
+### 1.2 發佈與版本
+
+- **只有 push 到 `main` 才會發佈**:CI 編譯 Linux arm64 / x64 與 Windows,更新同一個 GitHub Release (`latest`),最後才上傳 `version.json`。PR 只跑測試。
+- **版本編號**是 GitHub Actions 的 run number (`APP_BUILD`,畫面上的 build 號碼),pubspec 的版本號不用改。
+- **所有機台會在 10 分鐘內自動更新**,所以 push 到 `main` 前請確定測試通過。新版若啟動就失敗,機台會自動退回上一版並不再安裝這個版本 (見 [deploy/README.md](deploy/README.md) §5);修正後再 push 一版即可。
 
 > 伺服器位址**不寫死在程式裡**:由使用者在機台的設定畫面輸入(見第 2 節)。
 
@@ -171,7 +192,9 @@ main()
 
 ### 3.4 上傳重試策略
 
-上傳失敗後,依序間隔 **1 秒 → 5 秒 → 30 秒 → 5 分鐘 → 30 分鐘**重試,**最多 5 次**。超過 5 次後標記為 failed,之後只能由使用者在紀錄畫面手動重試。佇列依建立時間先進先出(FIFO),遇到網路中斷或 401 就停止這一輪。
+上傳失敗後,依序間隔 **1 秒 → 5 秒 → 30 秒 → 5 分鐘 → 30 分鐘**重試,之後**每 30 分鐘一次,直到成功**:網路中斷、逾時、5xx 與 401 都不會放棄,server 停機再久,恢復後都會自動補傳。只有不可重試的錯誤(4xx、422)才標記為 failed,由使用者在紀錄畫面確認後手動重試。佇列依建立時間先進先出(FIFO),遇到網路中斷或 401 就停止這一輪。
+
+每筆紀錄在上傳前就連同佇列項目一起寫入本機資料庫;上傳到一半斷電或當機,下次啟動會自動補傳。所以**同一筆紀錄可能送到兩次**,接收器一定要依 `client_record_id` 去重(見 §4.6)。
 
 ---
 
@@ -382,7 +405,7 @@ main()
 - **server → 機台**(JSON 文字訊息):
   - 連上後先收 `{ "event": "connected", "device_id": "...", "machine_id": 1, "server_time": "..." }`
   - 之後每次變動收 `{ "event": "data_changed", "datasets": ["rooms", "beds"], "timestamp": 1726900123 }`,`datasets` 是 `rooms` / `beds` / `meals` 的子集:住民新增、修改、刪除 → `rooms` + `beds`;用膳時段或菜單變動 → `meals`
-- **機台 → server**:可送 `{ "type": "ping" }`,server 回 `{ "event": "pong" }`(選用;目前機台不主動送)
+- **機台 → server**:可送 `{ "type": "ping" }`,server 回 `{ "event": "pong" }`(選用;目前機台不送這個訊息)。機台每 20 秒送一次 WebSocket 協定層的 ping frame,用來發現已經斷掉卻沒收到關閉通知的連線;標準的 WebSocket server (Daphne / Channels) 會自動回 pong,接收器不需要處理
 - **機台行為**(`lib/services/realtime_service.dart`、`sync_service.dart`):
   - 收到 `data_changed` 後合併 1.5 秒內的所有事件,只對列出的 dataset 做一次重抓(不帶 `last_updated`,整批取代快取),畫面隨即更新
   - 連線建立時(第一次或重連)一律三個查詢 API 全部重抓,補上斷線期間錯過的變動

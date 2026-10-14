@@ -15,6 +15,8 @@ Environment=SPOONFULL_KIOSK=1
 Environment=SPOONFULL_SUPERVISED=1
 # 沒有 keyring 時 flutter_secure_storage 會失敗,App 會自動退回檔案儲存 (lib/data/local/secure_token_storage.dart)
 WorkingDirectory=/opt/spoonfull
+# 自動更新的退路:上次更新被中斷,或新版連續啟動失敗,就換回上一版 (deploy/spoonfull-recover.sh)
+ExecStartPre=-/bin/sh /opt/spoonfull/spoonfull-recover.sh /opt/spoonfull
 ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -S "/tmp/.X11-unix/X0" ] && exit 0; sleep 1; done; exit 0'
 ExecStart=/opt/spoonfull/spoonfull_flutter_app
 Restart=always

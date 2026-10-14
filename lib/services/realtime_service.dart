@@ -25,8 +25,10 @@ abstract class RealtimeChannel {
   int? get closeCode;
 }
 
-typedef RealtimeConnector =
-    Future<RealtimeChannel> Function(Uri uri, Map<String, String> headers);
+typedef RealtimeConnector = Future<RealtimeChannel> Function(
+  Uri uri,
+  Map<String, String> headers,
+);
 
 class _IoChannel implements RealtimeChannel {
   _IoChannel(this._socket);
@@ -43,11 +45,19 @@ class _IoChannel implements RealtimeChannel {
 }
 
 /// 以 dart:io 建立連線 (Linux 機台與 Android 都可用,不支援 web)。
-Future<RealtimeChannel> ioConnector(Uri uri, Map<String, String> headers) async {
+Future<RealtimeChannel> ioConnector(
+  Uri uri,
+  Map<String, String> headers,
+) async {
+  // 交給 _IoChannel,由 RealtimeService 關閉。
+  // ignore: close_sinks
   final socket = await WebSocket.connect(
     uri.toString(),
     headers: headers,
   ).timeout(AppConstants.requestTimeout);
+  // 定時 ping:漫遊換 AP、NAT 逾時或 server 硬重開時不會收到 FIN,沒有心跳的話
+  // 連線看起來還在,推播卻再也收不到。沒回應就會觸發 onDone,照常重連。
+  socket.pingInterval = AppConstants.realtimePingInterval;
   return _IoChannel(socket);
 }
 
@@ -61,9 +71,9 @@ class RealtimeService {
   RealtimeService({
     required this.baseUrlProvider,
     required this.tokenProvider,
-    RealtimeConnector connector = ioConnector,
+    this._connector = ioConnector,
     this.reconnectDelays = AppConstants.realtimeReconnectDelays,
-  }) : _connector = connector;
+  });
 
   /// server 以 4401 關閉連線 = REST 的 401。
   static const int closeUnauthorized = 4401;
@@ -89,6 +99,8 @@ class RealtimeService {
   bool _enabled = false;
   bool _connecting = false;
   RealtimeChannel? _channel;
+  // 在 _drop() 取消。
+  // ignore: cancel_subscriptions
   StreamSubscription<dynamic>? _sub;
   Timer? _reconnect;
   int _attempt = 0;
@@ -134,14 +146,16 @@ class RealtimeService {
 
   Future<void> _connect() async {
     if (!_enabled || _connecting || _channel != null) return;
-    final uri = _uri();
-    final token = await tokenProvider();
-    if (uri == null || token == null || token.isEmpty) {
-      _scheduleReconnect();
-      return;
-    }
+    // 在第一個 await 之前就標記,否則重連計時器與網路恢復同時觸發時,
+    // 兩個呼叫都會通過上面的檢查,各建一條連線,其中一條永遠不會被關閉。
     _connecting = true;
     try {
+      final uri = _uri();
+      final token = await tokenProvider();
+      if (uri == null || token == null || token.isEmpty) {
+        _scheduleReconnect();
+        return;
+      }
       final channel = await _connector(uri, {'Authorization': 'Bearer $token'});
       if (!_enabled) {
         await channel.close();
@@ -168,7 +182,9 @@ class RealtimeService {
   void _onMessage(dynamic raw) {
     Map<String, Object?> body;
     try {
-      final decoded = jsonDecode(raw is String ? raw : utf8.decode(raw as List<int>));
+      final decoded = jsonDecode(
+        raw is String ? raw : utf8.decode(raw as List<int>),
+      );
       if (decoded is! Map) return;
       body = decoded.cast<String, Object?>();
     } catch (e) {
@@ -219,14 +235,16 @@ class RealtimeService {
 
   Future<void> _drop() async {
     final channel = _channel;
+    final sub = _sub;
     _channel = null;
-    await _sub?.cancel();
     _sub = null;
+    // 先關連線再取消訂閱:取消訂閱不一定會返回,不能讓它擋住關閉。
     if (channel != null) {
       try {
         await channel.close();
       } catch (_) {}
       if (!_connections.isClosed) _connections.add(false);
     }
+    await sub?.cancel();
   }
 }

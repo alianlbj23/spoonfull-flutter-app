@@ -74,6 +74,13 @@ Future<void> _tarExtract(File archive, Directory target) async {
 /// 只在 CI 編譯的版本 ([AppConfig.buildNumber] > 0) 且安裝目錄可寫入時啟用;
 /// 本機 `flutter run` 不會自我更新。為了不打斷操作,只在沒有拍照 / 上傳、
 /// 且使用者一段時間沒有碰螢幕時才安裝;剛啟動時視為閒置,會立即安裝。
+///
+/// 壞版本的退路:安裝時被換掉的舊檔會改名成 `*.spoonfull-old` 留著,新版順利
+/// 跑滿 [healthyAfter] ([confirmHealthy]) 才刪除。在那之前:
+/// - 安裝到一半失敗 → 當場換回舊檔;
+/// - 安裝到一半斷電 ([inProgressMarker] 還在) → 下次啟動換回舊檔;
+/// - 新版一啟動就當掉 → kiosk 服務的 `deploy/spoonfull-recover.sh` 數到第 4 次
+///   啟動就換回舊檔,並把這個版本寫進 [badBuildMarker],之後不再安裝它。
 class UpdateService {
   UpdateService({
     required this._connectivity,
@@ -86,17 +93,33 @@ class UpdateService {
     this._restart,
     this.idleBeforeRestart = AppConstants.updateIdleBeforeRestart,
     this.installNotice = AppConstants.updateInstallNotice,
+    this.healthyAfter = AppConstants.updateHealthyAfter,
   }) : currentBuild = currentBuild ?? AppConfig.buildNumber,
        _baseUrl = baseUrl ?? AppConfig.updateBaseUrl,
        platform = platform ?? detectPlatform(),
-       installDir =
-           installDir ?? File(Platform.resolvedExecutable).parent,
+       installDir = installDir ?? File(Platform.resolvedExecutable).parent,
        _client = client ?? http.Client(),
        _extract = extract ?? _tarExtract;
 
-  /// Windows 無法覆蓋執行中的檔案,但可以改名:舊檔先改成這個副檔名,下次啟動時刪除。
+  /// 被換掉的舊檔改成這個副檔名 (Windows 無法覆蓋執行中的檔案,但可以改名),
+  /// 新版確認正常後才刪除。
   static const String oldSuffix = '.spoonfull-old';
+
+  /// 正在替換檔案;啟動時還在代表上次安裝被中斷 (斷電)。
+  static const String inProgressMarker = '.update-in-progress';
+
+  /// 新版已裝好但還沒確認正常;內容是新版的 build。
+  static const String pendingMarker = '.update-pending';
+
+  /// 被退回的版本 (內容是 build),不再安裝。
+  static const String badBuildMarker = '.update-bad-build';
+
+  /// `deploy/spoonfull-recover.sh` 的啟動計數;存在代表機台有裝這支腳本。
+  static const String bootCountFile = '.boot-count';
   static const String _stagingName = '.update';
+
+  /// 同一次執行中安裝失敗這麼多次就不再嘗試,避免更新提示一直跳出來擋住操作。
+  static const int _maxInstallFailures = 3;
 
   final ConnectivityService _connectivity;
   final int currentBuild;
@@ -108,6 +131,7 @@ class UpdateService {
   final Future<void> Function()? _restart;
   final Duration idleBeforeRestart;
   final Duration installNotice;
+  final Duration healthyAfter;
 
   /// 正在拍照或上傳時回傳 true,這時不會安裝更新。
   bool Function() isBusy = () => false;
@@ -120,8 +144,11 @@ class UpdateService {
   StreamSubscription<bool>? _sub;
   Timer? _timer;
   Timer? _retry;
+  Timer? _healthy;
   bool _running = false;
   Directory? _staged;
+  int _stagedBuild = 0;
+  int _installFailures = 0;
   DateTime? _lastActivity;
 
   static String? detectPlatform() {
@@ -133,8 +160,7 @@ class UpdateService {
     return null;
   }
 
-  Directory get _stagingDir =>
-      Directory(p.join(installDir.path, _stagingName));
+  Directory get _stagingDir => Directory(p.join(installDir.path, _stagingName));
 
   late final bool enabled = _checkEnabled();
 
@@ -161,8 +187,28 @@ class UpdateService {
   /// 使用者碰了螢幕:延後安裝,避免操作到一半重新啟動。
   void noteActivity() => _lastActivity = DateTime.now();
 
+  File _marker(String name) => File(p.join(installDir.path, name));
+
+  int? _readBuild(String name) {
+    try {
+      final f = _marker(name);
+      return f.existsSync() ? int.tryParse(f.readAsStringSync().trim()) : null;
+    } on FileSystemException {
+      return null;
+    }
+  }
+
+  /// 剛裝好的版本還沒確認正常 (舊檔還留著)。
+  bool get hasUnconfirmedUpdate =>
+      enabled && _marker(pendingMarker).existsSync();
+
+  /// 機台有裝 `spoonfull-recover.sh`:啟動失敗時結束程序,腳本數到上限就會退回舊版。
+  bool get rollbackSupervised =>
+      hasUnconfirmedUpdate && _marker(bootCountFile).existsSync();
+
   void start() {
     if (!enabled) return;
+    _recoverInterrupted();
     _cleanLeftovers();
     _sub = _connectivity.onStatusChange.listen((online) {
       if (online) unawaited(check());
@@ -177,16 +223,22 @@ class UpdateService {
   /// 檢查一次;有新版就下載,閒置時安裝並重新啟動。失敗只記 log,下次再試。
   Future<void> check() async {
     if (!enabled || _running) return;
+    if (_installFailures >= _maxInstallFailures) return;
     _running = true;
     try {
       if (_staged == null) {
         final manifest = await _fetchManifest();
         if (manifest.build <= currentBuild) return;
+        if (manifest.build == _readBuild(badBuildMarker)) {
+          Log.i('update: build ${manifest.build} was rolled back, skipping');
+          return;
+        }
         final asset = manifest.assets[platform];
         if (asset == null) return;
         Log.i('update: build ${manifest.build} available (have $currentBuild)');
         status.value = UpdateStatus.downloading;
         _staged = await _download(asset);
+        _stagedBuild = manifest.build;
         status.value = UpdateStatus.ready;
       }
       await _installWhenIdle();
@@ -201,8 +253,7 @@ class UpdateService {
   bool get _idle {
     if (isBusy()) return false;
     final last = _lastActivity;
-    return last == null ||
-        DateTime.now().difference(last) >= idleBeforeRestart;
+    return last == null || DateTime.now().difference(last) >= idleBeforeRestart;
   }
 
   Future<void> _installWhenIdle() async {
@@ -216,7 +267,16 @@ class UpdateService {
     status.value = UpdateStatus.installing;
     // 讓使用者看到更新提示;提示會擋住觸控,這段時間不會開始新的操作。
     await Future<void>.delayed(installNotice);
-    _install(_staged!);
+    try {
+      _install(_staged!, _stagedBuild);
+    } on Object {
+      // 檔案已換回舊版。拿掉提示讓使用者繼續操作,下次檢查重新下載。
+      _installFailures++;
+      _staged = null;
+      _cleanLeftovers();
+      status.value = UpdateStatus.idle;
+      rethrow;
+    }
     Log.i('update installed, restarting');
     try {
       await onBeforeRestart?.call().timeout(const Duration(seconds: 5));
@@ -280,18 +340,41 @@ class UpdateService {
     }
   }
 
-  /// 把新版檔案逐一改名到安裝目錄。執行中的程式仍使用舊檔,重新啟動後才換成新版。
-  void _install(Directory root) {
-    for (final entity in root.listSync(recursive: true, followLinks: false)) {
-      if (entity is! File) continue;
-      final dest = File(
-        p.join(installDir.path, p.relative(entity.path, from: root.path)),
-      );
-      dest.parent.createSync(recursive: true);
-      if (Platform.isWindows && dest.existsSync()) {
-        dest.renameSync('${dest.path}$oldSuffix');
+  /// 把新版檔案逐一改名到安裝目錄,被換掉的舊檔留成 `*.spoonfull-old`。
+  /// 執行中的程式仍使用舊檔,重新啟動後才換成新版。中途失敗會把已換的檔案換回去。
+  void _install(Directory root, int build) {
+    // 上一個版本還沒確認就又要更新:它能活到下載完新版,拿它當這次的退路。
+    _commit();
+    final marker = _marker(inProgressMarker)..writeAsStringSync('$build');
+    final moved = <(File, File?)>[];
+    try {
+      for (final entity in root.listSync(recursive: true, followLinks: false)) {
+        if (entity is! File) continue;
+        final dest = File(
+          p.join(installDir.path, p.relative(entity.path, from: root.path)),
+        );
+        dest.parent.createSync(recursive: true);
+        final old = dest.existsSync()
+            ? dest.renameSync('${dest.path}$oldSuffix')
+            : null;
+        moved.add((dest, old));
+        entity.renameSync(dest.path);
       }
-      entity.renameSync(dest.path);
+      marker.renameSync(_marker(pendingMarker).path);
+    } on Object catch (e) {
+      Log.e('update install failed, restoring previous files', e);
+      for (final (dest, old) in moved.reversed) {
+        try {
+          if (dest.existsSync()) dest.deleteSync();
+          old?.renameSync(dest.path);
+        } on FileSystemException catch (e) {
+          Log.e('update: cannot restore ${dest.path}', e);
+        }
+      }
+      try {
+        marker.deleteSync();
+      } on FileSystemException catch (_) {}
+      rethrow;
     }
     _staged = null;
     try {
@@ -299,14 +382,62 @@ class UpdateService {
     } catch (_) {}
   }
 
-  /// 清掉上次更新留下的暫存資料夾與 (Windows) 改名後的舊檔。
+  Iterable<File> _oldFiles() => installDir
+      .listSync(recursive: true, followLinks: false)
+      .whereType<File>()
+      .where((f) => f.path.endsWith(oldSuffix));
+
+  /// 目前的版本確認正常:刪掉留著當退路的舊檔與標記。
+  void _commit() {
+    try {
+      for (final f in _oldFiles()) {
+        f.deleteSync();
+      }
+      for (final name in const [pendingMarker, bootCountFile]) {
+        final f = _marker(name);
+        if (f.existsSync()) f.deleteSync();
+      }
+    } on FileSystemException catch (e) {
+      Log.i('update commit: $e');
+    }
+  }
+
+  /// App 已正常啟動:[healthyAfter] 之後確認這個版本,刪掉舊檔。
+  /// 由 main() 在服務都建立成功後呼叫;啟動失敗時不呼叫,舊檔留著當退路。
+  void confirmHealthy() {
+    if (!enabled) return;
+    _healthy?.cancel();
+    _healthy = Timer(healthyAfter, () {
+      if (hasUnconfirmedUpdate) Log.i('update: build $currentBuild confirmed');
+      _commit();
+    });
+  }
+
+  /// 上次安裝到一半被中斷 (斷電):把舊檔換回去。kiosk 服務的
+  /// `spoonfull-recover.sh` 會在 App 啟動前先做;這裡是沒有那支腳本時的備援。
+  void _recoverInterrupted() {
+    final marker = _marker(inProgressMarker);
+    try {
+      if (!marker.existsSync()) return;
+      Log.e('update: previous install was interrupted, restoring old files');
+      for (final old in _oldFiles().toList()) {
+        final dest = old.path.substring(0, old.path.length - oldSuffix.length);
+        try {
+          old.renameSync(dest);
+        } on FileSystemException catch (e) {
+          Log.e('update: cannot restore $dest', e);
+        }
+      }
+      marker.deleteSync();
+    } on FileSystemException catch (e) {
+      Log.i('update recovery: $e');
+    }
+  }
+
+  /// 清掉上次更新留下的暫存資料夾。
   void _cleanLeftovers() {
     try {
       if (_stagingDir.existsSync()) _stagingDir.deleteSync(recursive: true);
-      if (!Platform.isWindows) return;
-      for (final f in installDir.listSync(recursive: true, followLinks: false)) {
-        if (f is File && f.path.endsWith(oldSuffix)) f.deleteSync();
-      }
     } on FileSystemException catch (e) {
       Log.i('update cleanup: $e');
     }
@@ -329,6 +460,7 @@ class UpdateService {
   Future<void> dispose() async {
     _timer?.cancel();
     _retry?.cancel();
+    _healthy?.cancel();
     await _sub?.cancel();
     _client.close();
   }

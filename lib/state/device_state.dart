@@ -19,6 +19,7 @@ class DeviceState extends ChangeNotifier {
 
   final AppServices _services;
   StreamSubscription<void>? _unauthSub;
+  bool _handlingUnauthorized = false;
 
   PairingStatus status = PairingStatus.initializing;
   bool serverReachable = false;
@@ -36,10 +37,21 @@ class DeviceState extends ChangeNotifier {
   /// 啟動流程 (規格 9.1)。
   Future<void> initialize() async {
     databaseReady = true;
-    final valid = await _services.pairing.hasValidToken();
+    bool valid;
+    try {
+      valid = await _services.pairing.hasValidToken();
+    } on Object catch (e) {
+      // 讀不到 token 時當成未配對,不要讓歡迎畫面永遠停在載入中。
+      Log.e('cannot read pairing state', e);
+      valid = false;
+    }
     status = valid ? PairingStatus.paired : PairingStatus.notPaired;
     notifyListeners();
-    await _services.sync.start();
+    try {
+      await _services.sync.start();
+    } on Object catch (e) {
+      Log.e('sync start failed', e);
+    }
     unawaited(checkServer());
     if (valid) {
       unawaited(_services.sync.syncAll());
@@ -51,7 +63,9 @@ class DeviceState extends ChangeNotifier {
   /// 有 `--dart-define=PAIRING_CODE` 且已填伺服器設定時自動配對 (開發 / 測試用)。
   /// 回傳是否配對成功;沒有設定固定碼時直接回 false。
   Future<bool> autoPair() async {
-    if (!AppConfig.hasAutoPairingCode || isPaired || !isConfigured) return false;
+    if (!AppConfig.hasAutoPairingCode || isPaired || !isConfigured) {
+      return false;
+    }
     if (status == PairingStatus.pairing) return false;
     Log.i('auto pairing with PAIRING_CODE');
     return pair(AppConfig.autoPairingCode);
@@ -108,13 +122,21 @@ class DeviceState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 一次 401 可能從 API 與同步兩處各通知一次;處理中的重複通知直接略過。
   Future<void> _handleUnauthorized() async {
-    if (!isPaired) return;
-    forcedLogoutMessage = '認證失敗,需要重新配對';
-    await unpair();
-    // 固定配對碼模式:被踢掉就自動重配,不用人工介入。
-    if (await autoPair()) forcedLogoutMessage = null;
+    if (!isPaired || _handlingUnauthorized) return;
+    _handlingUnauthorized = true;
+    try {
+      forcedLogoutMessage = '認證失敗,需要重新配對';
+      await unpair();
+      // 固定配對碼模式:被踢掉就自動重配,不用人工介入。
+      if (await autoPair()) forcedLogoutMessage = null;
+    } finally {
+      _handlingUnauthorized = false;
+    }
   }
+
+  String errorMessage(Object e) => _services.errors.userMessage(e);
 
   void consumeForcedLogout() => forcedLogoutMessage = null;
 

@@ -26,15 +26,13 @@ enum AppErrorType {
 
   /// 回應格式無法解析
   parse,
+
+  /// 非預期的例外 (程式或本機 I/O 錯誤) → 顯示通用訊息,細節只寫 log
+  unknown,
 }
 
 class AppException implements Exception {
-  const AppException(
-    this.type,
-    this.message, {
-    this.code,
-    this.statusCode,
-  });
+  const AppException(this.type, this.message, {this.code, this.statusCode});
 
   final AppErrorType type;
   final String message;

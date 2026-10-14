@@ -75,7 +75,11 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
   }
 
   Future<void> _editPort() async {
-    final value = await showNumericKeypad(context, initial: _port, maxLength: 5);
+    final value = await showNumericKeypad(
+      context,
+      initial: _port,
+      maxLength: 5,
+    );
     if (value != null) setState(() => _port = value);
   }
 
@@ -86,9 +90,17 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
     final device = context.read<DeviceState>();
     final navigator = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
-    await device.saveServerSettings(_settings);
+    try {
+      await device.saveServerSettings(_settings);
+    } on Object catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('儲存失敗:${device.errorMessage(e)}')),
+      );
+      return;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
     if (!mounted) return;
-    setState(() => _saving = false);
 
     if (!device.isPaired) {
       // 有固定配對碼 (--dart-define=PAIRING_CODE) → 直接自動配對,不跳鍵盤。
@@ -122,10 +134,7 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
     padding: const EdgeInsets.only(left: 12, bottom: 6),
     child: Text(
       error ? '*$text' : text,
-      style: AppText.size(
-        40,
-        color: error ? AppColors.error : AppColors.navy,
-      ),
+      style: AppText.size(40, color: error ? AppColors.error : AppColors.navy),
     ),
   );
 
@@ -141,11 +150,7 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
       resizeToAvoidBottomInset: false,
       body: Stack(
         children: [
-          Positioned(
-            left: 17,
-            top: 19,
-            child: BackTile(onTap: _back),
-          ),
+          Positioned(left: 17, top: 19, child: BackTile(onTap: _back)),
           if (widget.embedded)
             Positioned(
               right: 16,
@@ -262,6 +267,12 @@ class SystemStatusDialog extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            row(
+              '版本',
+              AppConfig.buildNumber > 0
+                  ? 'build ${AppConfig.buildNumber}'
+                  : '開發版 (不會自動更新)',
+            ),
             row('設備 ID', device.config.deviceId),
             row('設備名稱', device.config.deviceName),
             row(
@@ -281,6 +292,8 @@ class SystemStatusDialog extends StatelessWidget {
                   ? AppColors.success
                   : AppColors.error,
             ),
+            if (device.serverSettings.baseUrl?.startsWith('http://') ?? false)
+              row('連線加密', '未加密 (http),資料以明文傳輸', color: AppColors.orangeText),
             row('最後同步', lastSync),
             row('待上傳', '${sync.pendingCount} 筆'),
             row(

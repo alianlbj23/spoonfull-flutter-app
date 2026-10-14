@@ -8,6 +8,10 @@
 #
 # 每次 push 到 main 都會更新同一個 Release (tag `latest`),只保留最新版,下載網址固定:
 #   https://github.com/<owner>/<repo>/releases/latest/download/<檔名>
+# PR 只跑 check (analyze + test),不編譯也不發佈;check 沒過就不會編譯。
+#
+# 第三方 action 一律釘 commit SHA (註解是對應的 tag):產物會被所有機台自動安裝,
+# tag 被改寫就等於能把任意程式送進機台。
 #
 # 自動更新 (lib/services/update_service.dart):run number 會編進 App (APP_BUILD),
 # Release 另外放一份 version.json (最新的 run number 與各檔案的 SHA-256)。
@@ -17,13 +21,46 @@ name: Build
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
+
+# 預設只能讀;只有 release job 拿到寫入權限。
+permissions:
+  contents: read
+
+# 同一分支一次只跑一個,依序發佈,較舊的 build 不會比較晚發佈而蓋掉新版;
+# 排隊中的舊執行會被較新的取代。PR 的舊執行直接取消。
+# main 不取消執行中的工作,以免發佈做到一半被中斷。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FLUTTER_VERSION: 3.47.6
 
 jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Analyze
+        run: |
+          flutter pub get
+          flutter analyze --no-fatal-infos
+
+      - name: Test
+        run: flutter test
+
   linux:
+    if: github.event_name != 'pull_request'
+    needs: check
     strategy:
       fail-fast: false
       matrix:
@@ -34,7 +71,7 @@ jobs:
             runner: ubuntu-24.04
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install build dependencies
         run: |
@@ -42,10 +79,21 @@ jobs:
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev \
             liblzma-dev libstdc++-12-dev libsecret-1-dev libjsoncpp-dev
 
+      # Flutter SDK 與 pub 套件每次都重新下載要好幾分鐘,快取起來。
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/flutter
+            ~/.pub-cache
+          key: flutter-${{ env.FLUTTER_VERSION }}-linux-${{ matrix.arch }}-${{ hashFiles('pubspec.lock') }}
+          restore-keys: flutter-${{ env.FLUTTER_VERSION }}-linux-${{ matrix.arch }}-
+
       # Flutter 沒有提供 arm64 Linux 的 SDK 壓縮檔,直接 clone 指定版本
       - name: Install Flutter
         run: |
-          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$HOME/flutter"
+          if [ ! -x "$HOME/flutter/bin/flutter" ]; then
+            git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$HOME/flutter"
+          fi
           echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
 
       - name: Build
@@ -53,25 +101,30 @@ jobs:
           flutter config --enable-linux-desktop --no-analytics
           flutter pub get
           flutter build linux --release \
+            --build-name=1.0.${{ github.run_number }} \
             --build-number=${{ github.run_number }} \
             --dart-define=APP_BUILD=${{ github.run_number }}
 
-      # 用 tar 打包,保留執行檔權限 (artifact 的 zip 會弄丟 +x)
+      # 用 tar 打包,保留執行檔權限 (artifact 的 zip 會弄丟 +x)。
+      # 退回舊版的腳本跟著 App 一起更新 (kiosk 服務啟動前執行)。
       - name: Package bundle
         run: |
+          install -m 755 deploy/spoonfull-recover.sh build/linux/${{ matrix.arch }}/release/bundle/
           tar -czf spoonfull-linux-${{ matrix.arch }}.tar.gz -C build/linux/${{ matrix.arch }}/release bundle
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: spoonfull-linux-${{ matrix.arch }}
           path: spoonfull-linux-${{ matrix.arch }}.tar.gz
 
   windows:
+    if: github.event_name != 'pull_request'
+    needs: check
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
@@ -81,7 +134,7 @@ jobs:
         run: |
           flutter config --enable-windows-desktop --no-analytics
           flutter pub get
-          flutter build windows --release --build-number=${{ github.run_number }} --dart-define=APP_BUILD=${{ github.run_number }}
+          flutter build windows --release --build-name=1.0.${{ github.run_number }} --build-number=${{ github.run_number }} --dart-define=APP_BUILD=${{ github.run_number }}
 
       # 一併放入 VC++ runtime,沒裝 Visual C++ Redistributable 的電腦也能直接執行
       - name: Package
@@ -93,7 +146,7 @@ jobs:
           }
           Compress-Archive -Path "$release\*" -DestinationPath spoonfull-windows-x64.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: spoonfull-windows-x64
           path: spoonfull-windows-x64.zip
@@ -106,7 +159,20 @@ jobs:
       contents: write
     concurrency: release-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # 重跑舊的執行時,不要把 Release 換回比較舊的版本。
+      - name: Refuse to publish an older build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          current=$(gh release download latest --pattern version.json --output - 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["build"])' 2>/dev/null || echo 0)
+          echo "published build: $current, this build: ${{ github.run_number }}"
+          if [ "$current" -gt "${{ github.run_number }}" ]; then
+            echo "::error::Release already has build $current; not publishing older build ${{ github.run_number }}"
+            exit 1
+          fi
 
       # 把 latest tag 移到這次的 commit (GITHUB_TOKEN 推的 tag 不會再觸發 workflow)
       - name: Move latest tag
@@ -114,12 +180,12 @@ jobs:
           git tag -f latest
           git push -f origin latest
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           merge-multiple: true
 
       # 同名檔案會被覆蓋,Release 永遠只有最新一份
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: latest
           name: 最新版

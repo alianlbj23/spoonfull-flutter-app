@@ -22,16 +22,21 @@ class SpoonfullApp extends StatelessWidget {
     return MultiProvider(
       providers: [
         Provider<AppServices>.value(value: services),
+        // lazy: false — 啟動流程與下面的 isBusy 不能等到有畫面讀取才接上。
         ChangeNotifierProvider(
+          lazy: false,
           create: (_) => DeviceState(services)..initialize(),
         ),
         ChangeNotifierProvider(create: (_) => SyncState(services)),
         ChangeNotifierProvider(
+          lazy: false,
           create: (_) {
             final records = RecordState(services)..loadAll();
-            // 拍照或上傳中不安裝更新
+            // 拍照、上傳中或照片還在等確認時不安裝更新
             services.updates.isBusy = () =>
-                records.capturing || records.uploading;
+                records.capturing ||
+                records.uploading ||
+                records.confirmingCapture;
             return records;
           },
         ),

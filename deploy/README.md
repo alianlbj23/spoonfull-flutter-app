@@ -2,37 +2,37 @@
 
 對應 [ARCHITECTURE.md](../ARCHITECTURE.md) §5 與 §11 階段 5。機台只做採集:拍照、秤重、品質檢查、上傳,不跑任何 AI。
 
-## 1. 在開發機交叉編譯或在機台上編譯
+## 1. 安裝到機台
 
-Flutter Linux 需要在 **arm64 Linux** 上編譯 (Flutter 不支援從 x86 交叉編譯到 arm64)。兩種做法:
+```bash
+git clone https://github.com/alianlbj23/spoonfull-flutter-app.git
+cd spoonfull-flutter-app
+sudo ./deploy/install-device.sh --user <登入帳號> [--hx711]
+```
 
-| 做法 | 說明 |
-|---|---|
-| 直接在機台上編譯 | 機台裝 Flutter SDK (arm64 Linux 版),`flutter build linux --release`。Jetson Orin Nano 8GB / Pi 5 8GB 都可以,第一次約 10–20 分鐘。 |
-| 另一台 arm64 Linux 編譯機 | 例如 arm64 Ubuntu VM 或 CI 的 arm64 runner,再把 `build/linux/arm64/release/bundle/` 複製到機台。 |
+腳本會從 GitHub Release 下載 CI 編譯的最新版到 `/opt/spoonfull`(已經有 App 就不下載)。**一定要用 Release 的版本**:只有 CI 編譯的版本會自動更新(見 §5)。
 
-編譯相依 (機台或編譯機):
+`install-device.sh` 還會:安裝 GStreamer / v4l-utils / libsecret、設定 udev 權限 (hidraw、ttyUSB、video)、開 NTP、安裝 `spoonfull-kiosk.service` (開機全螢幕啟動,`SPOONFULL_KIOSK=1`)。
+
+機台要先有自動登入的桌面 session (Pi OS Desktop 預設有;Jetson 的 Ubuntu 在「設定 → 使用者」開自動登入)。服務啟動後 App 全螢幕、無標題列、隱藏游標。
+
+> 已經在跑的機台,重跑一次 `install-device.sh` 就會裝上「新版啟動失敗時自動退回上一版」的機制(`spoonfull-recover.sh` 與新的 kiosk 服務設定),App 本身不會被覆蓋。
+
+## 2. 自己編譯(開發用)
+
+自己 `flutter build` 的版本 `APP_BUILD` 是 0,**不會自動更新**,只適合開發測試。Flutter Linux 需要在 **arm64 Linux** 上編譯 (Flutter 不支援從 x86 交叉編譯到 arm64):
 
 ```bash
 sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
   libsecret-1-dev libjsoncpp-dev   # flutter_secure_storage_linux 需要
 flutter config --enable-linux-desktop
 flutter build linux --release
+sudo mkdir -p /opt/spoonfull
+sudo cp -r build/linux/arm64/release/bundle/* /opt/spoonfull/
+sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
 ```
 
 > 不要帶 `--dart-define=USE_MOCK_API=true` 到正式機台。
-
-## 2. 安裝到機台
-
-```bash
-sudo mkdir -p /opt/spoonfull
-sudo cp -r build/linux/arm64/release/bundle/* /opt/spoonfull/
-sudo ./deploy/install-device.sh --user <登入帳號> [--hx711]
-```
-
-`install-device.sh` 會:安裝 GStreamer / v4l-utils / libsecret、設定 udev 權限 (hidraw、ttyUSB、video)、開 NTP、安裝 `spoonfull-kiosk.service` (開機全螢幕啟動,`SPOONFULL_KIOSK=1`)。
-
-機台要先有自動登入的桌面 session (Pi OS Desktop 預設有;Jetson 的 Ubuntu 在「設定 → 使用者」開自動登入)。服務啟動後 App 全螢幕、無標題列、隱藏游標。
 
 ## 3. 硬體
 
@@ -68,14 +68,24 @@ sudo ./deploy/install-device.sh --user <登入帳號> [--hx711]
 每次 push 到 `main`,GitHub Actions 會編譯三個平台並更新同一個 Release (`latest`),同時放一份 `version.json`。已安裝的 App 會在**啟動時、網路恢復時、以及每 10 分鐘**讀一次 `version.json`,發現較新的版本就下載、驗證 SHA-256、替換安裝資料夾裡的檔案,然後重新啟動 ([lib/services/update_service.dart](../lib/services/update_service.dart))。
 
 - **不會打斷操作**:拍照或上傳中不安裝;使用者 60 秒內碰過螢幕也先不安裝。剛啟動時視為閒置,會馬上更新。安裝前畫面會顯示「正在更新到最新版本」約 3 秒。
-- **只有 GitHub 編譯的版本會自動更新**。本機 `flutter build` / `flutter run` 的版本編號是 0,不會更新自己。所以每台機器**第一次**要手動安裝一份從 Release 下載的版本,之後才會自己更新。
+- **只有 GitHub 編譯的版本會自動更新**。本機 `flutter build` / `flutter run` 的版本編號是 0,不會更新自己。`install-device.sh` 預設就會下載 Release 版本。
+- **壞版本會自動退回**:安裝時被換掉的舊檔會改名成 `*.spoonfull-old` 留著,新版順利跑滿 60 秒才刪掉。
+  - 安裝到一半失敗:當場換回舊檔,App 繼續使用。
+  - 安裝到一半斷電:下次開機換回舊檔。
+  - 新版一啟動就當掉(或啟動失敗):kiosk 服務每次啟動前執行 `spoonfull-recover.sh`,連續 3 次沒撐過 60 秒,第 4 次啟動就換回上一版,並把這個版本記在 `/opt/spoonfull/.update-bad-build`,之後不再安裝它。修正後推出更新的版本會照常安裝。
+  - 這需要 kiosk 服務裡的 `ExecStartPre=...spoonfull-recover.sh`;舊機台重跑一次 `install-device.sh` 即可。
+- **目前跑哪一版**:設定 → 系統狀態的「版本」(build 號碼 = GitHub Actions 的 run number)。
 - **安裝資料夾要可寫入**:機台由 `install-device.sh` 把 `/opt/spoonfull` 的擁有者改成執行 App 的帳號。Windows / Ubuntu 桌機請解壓縮到使用者自己的資料夾 (不要放 `C:\Program Files`)。
 - **機台要連得到 `github.com`**。醫院網路若有防火牆,需要放行 `github.com` 與 `objects.githubusercontent.com`,否則只是不會更新,App 照常運作。
 - **repo 必須是 public**,App 才讀得到 Release。
-- 看 log:`journalctl -u spoonfull-kiosk | grep -i update`。`auto-update off: ... is not writable` 表示安裝資料夾權限不對,重跑一次 `install-device.sh`。
+- 看 log:`journalctl -u spoonfull-kiosk | grep -i update`,或 App 自己的紀錄檔 `~/.local/share/com.example.spoonfull_flutter_app/logs/spoonfull.log` (見 §6)。`auto-update off: ... is not writable` 表示安裝資料夾權限不對,重跑一次 `install-device.sh`。
 - 更新來源可在編譯時用 `--dart-define=UPDATE_BASE_URL=https://.../` 改成自己的伺服器 (底下要有 `version.json` 與安裝檔)。
 
 ## 6. 常見問題
+
+- **App 的紀錄檔**:info 以上的訊息與所有錯誤 (含當機前的例外) 會寫到 App support 資料夾的 `logs/spoonfull.log`,Linux 通常是 `~/.local/share/com.example.spoonfull_flutter_app/logs/`。超過 1 MB 會改名成 `spoonfull.log.1`,只留一份舊檔。
+- **畫面顯示「系統啟動失敗」**:通常是本機資料庫打不開 (磁碟滿或檔案損毀)。看紀錄檔的 `startup failed`;更新器在這個畫面仍會運作,有修正版會自動裝上。
+- **照片佔用空間**:已上傳的照片 14 天後自動刪除,紀錄 90 天後刪除;還沒上傳的不會動。調整在 `lib/config/app_constants.dart` 的 `synced*Retention`。
 
 - **App 啟動後配對狀態每次都消失**:kiosk 沒有 keyring,App 會自動改用 `~/.local/share/.../auth_token.json` (權限 600)。看 log 有 `using file storage` 即正常。
 - **相機第一張很暗**:自動曝光還沒收斂。硬體設定沒有暴露暖機張數,預設連拍 9 張取最後一張;若仍暗,補光燈常亮,或在 `CameraSettings.warmupFrames` 調大。

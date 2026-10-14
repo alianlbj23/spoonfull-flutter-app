@@ -33,6 +33,12 @@ linter:
   rules:
     # avoid_print: false  # Uncomment to disable the `avoid_print` rule
     # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
+    # 計時器、stream 與背景 Future 很多,這幾條專抓「忘了等 / 忘了關」。
+    # 刻意不等的 Future 用 unawaited() 標出來。
+    unawaited_futures: true
+    cancel_subscriptions: true
+    close_sinks: true
+    only_throw_errors: true
 
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options

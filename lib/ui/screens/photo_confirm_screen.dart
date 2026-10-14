@@ -54,13 +54,23 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
   String? _weightNote;
   bool _weighing = false;
 
+  /// 秤的讀數不可信 (未穩定或幾乎沒有重量) 的原因;上傳前要使用者確認。
+  String? _weightDoubt;
+  late final RecordState _records;
+
   @override
   void initState() {
     super.initState();
-    final state = context.read<RecordState>();
-    _slot = state.currentTimeSlot();
-    _meal = state.defaultMealFor(_slot);
+    _records = context.read<RecordState>()..confirmingCapture = true;
+    _slot = _records.currentTimeSlot();
+    _meal = _records.defaultMealFor(_slot);
     _applyCapture(widget.capture);
+  }
+
+  @override
+  void dispose() {
+    _records.confirmingCapture = false;
+    super.dispose();
   }
 
   void _applyCapture(CaptureResult c) {
@@ -72,11 +82,29 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
       _weightSource = WeightSource.scale;
       _weightNote = w.stable ? null : '秤未穩定,請重新秤重或手動輸入';
       if (c.scaleLooksEmpty) _weightNote = '秤上幾乎沒有重量';
+      _weightDoubt = c.scaleLooksEmpty
+          ? '秤上幾乎沒有重量,餐盒可能沒有放在秤面上。'
+          : (w.stable ? null : '秤的讀數還沒穩定,這個重量可能不準。');
     } else {
       _weightG = null;
       _weightSource = WeightSource.none;
       _weightNote = c.weightError;
+      _weightDoubt = null;
     }
+  }
+
+  /// 秤有啟用卻沒有可信的重量時,先問過使用者再上傳。回傳是否繼續。
+  Future<bool> _confirmWeight() async {
+    final doubt = _weightSource == WeightSource.scale
+        ? _weightDoubt
+        : (_weightG == null && _records.scaleEnabled ? '這筆紀錄沒有重量。' : null);
+    if (doubt == null) return true;
+    final proceed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => WeightWarningDialog(message: doubt),
+    );
+    return proceed ?? false;
   }
 
   Future<void> _retake() async {
@@ -88,12 +116,13 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
       );
       if (capture == null) return;
       await state.discardImage(_imagePath);
+      if (!mounted) return;
       setState(() {
         _applyCapture(capture);
         _error = null;
       });
     } on Object catch (e) {
-      setState(() => _error = state.errorMessage(e));
+      if (mounted) setState(() => _error = state.errorMessage(e));
     }
   }
 
@@ -113,6 +142,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
           _weightG = w.grams;
           _weightSource = WeightSource.scale;
           _weightNote = w.stable ? null : '秤未穩定,請再試一次';
+          _weightDoubt = w.stable ? null : '秤的讀數還沒穩定,這個重量可能不準。';
         }
       });
     } on Object catch (e) {
@@ -140,6 +170,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
         _weightSource = WeightSource.manual;
       }
       _weightNote = null;
+      _weightDoubt = null;
     });
   }
 
@@ -150,6 +181,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
       return;
     }
     setState(() => _error = null);
+    if (!await _confirmWeight() || !mounted) return;
     try {
       final outcome = await state.upload(
         bed: widget.bed,
@@ -172,7 +204,7 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
       Navigator.of(context).popUntil((r) => r.isFirst);
     } on Object catch (e) {
       // 本機驗證失敗 → 立即顯示,讓使用者重新拍攝
-      setState(() => _error = state.errorMessage(e));
+      if (mounted) setState(() => _error = state.errorMessage(e));
     }
   }
 
@@ -182,167 +214,244 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
     final bed = widget.bed;
     final busy = state.uploading || state.capturing || _weighing;
 
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: Stack(
-        children: [
-          Positioned(
-            left: 25,
-            top: 23,
-            child: BackTile(
-              width: 110,
-              height: 108,
-              onTap: () async {
-                await state.discardImage(_imagePath);
-                if (context.mounted) Navigator.of(context).pop();
-              },
-            ),
-          ),
-          Positioned(
-            left: 25,
-            top: 150,
-            width: 470,
-            height: 420,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(16),
-              child: ColoredBox(
-                color: AppColors.periwinkleLight.withValues(alpha: 0.4),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Image.file(
-                      File(_imagePath),
-                      key: ValueKey(_imagePath),
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, _, _) => const Center(
-                        child: Icon(Icons.broken_image_outlined, size: 80),
-                      ),
-                    ),
-                    if (!_quality.passed)
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        top: 0,
-                        child: _QualityBanner(issues: _quality.issues),
-                      ),
-                    Positioned(
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: _WeightBar(
-                        grams: _weightG,
-                        source: _weightSource,
-                        note: _weightNote,
-                        scaleEnabled: state.scaleEnabled,
-                        weighing: _weighing,
-                        onReweigh: busy ? null : _reweigh,
-                        onManual: busy ? null : _enterWeight,
-                      ),
-                    ),
-                  ],
+    // 上傳 / 拍照 / 秤重進行中不能離開:返回會刪掉正在上傳的照片。
+    return PopScope(
+      canPop: !busy,
+      child: Scaffold(
+        backgroundColor: Colors.white,
+        body: Stack(
+          children: [
+            Positioned(
+              left: 25,
+              top: 23,
+              child: Opacity(
+                opacity: busy ? 0.45 : 1,
+                child: BackTile(
+                  width: 110,
+                  height: 108,
+                  onTap: () async {
+                    if (busy) return;
+                    await state.discardImage(_imagePath);
+                    if (context.mounted) Navigator.of(context).pop();
+                  },
                 ),
               ),
             ),
-          ),
-          Positioned(
-            left: 160,
-            top: 40,
-            right: 20,
-            child: Text(
-              '確認照片與餐別',
-              style: AppText.size(
-                44,
-                color: AppColors.navy,
-              ).copyWith(letterSpacing: 4),
+            Positioned(
+              left: 25,
+              top: 150,
+              width: 470,
+              height: 420,
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: ColoredBox(
+                  color: AppColors.periwinkleLight.withValues(alpha: 0.4),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      Image.file(
+                        File(_imagePath),
+                        key: ValueKey(_imagePath),
+                        fit: BoxFit.contain,
+                        errorBuilder: (_, _, _) => const Center(
+                          child: Icon(Icons.broken_image_outlined, size: 80),
+                        ),
+                      ),
+                      if (!_quality.passed)
+                        Positioned(
+                          left: 0,
+                          right: 0,
+                          top: 0,
+                          child: _QualityBanner(issues: _quality.issues),
+                        ),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        child: _WeightBar(
+                          grams: _weightG,
+                          source: _weightSource,
+                          note: _weightNote,
+                          scaleEnabled: state.scaleEnabled,
+                          weighing: _weighing,
+                          onReweigh: busy ? null : _reweigh,
+                          onManual: busy ? null : _enterWeight,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
-          ),
-          Positioned(
-            left: 520,
-            top: 150,
-            right: 24,
-            bottom: 16,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _InfoLine(
-                  '${widget.room.roomName}  ${bed.bedName}  '
-                  '${bed.patientName ?? ''}',
-                ),
-                const SizedBox(height: 6),
-                _Chip(label: widget.phase.label, selected: true, onTap: null),
-                const SizedBox(height: 14),
-                _SectionTitle('用餐時段'),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final s in state.timeSlots)
-                      _Chip(
-                        label:
-                            '${s.inferredMealType.label} ${s.timeSlotName}',
-                        selected: s.timeSlotId == _slot?.timeSlotId,
-                        onTap: () => setState(() {
-                          _slot = s;
-                          _meal = state.defaultMealFor(s);
-                        }),
+            Positioned(
+              left: 160,
+              top: 40,
+              right: 20,
+              child: Text(
+                '確認照片與餐別',
+                style: AppText.size(
+                  44,
+                  color: AppColors.navy,
+                ).copyWith(letterSpacing: 4),
+              ),
+            ),
+            Positioned(
+              left: 520,
+              top: 150,
+              right: 24,
+              bottom: 16,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _InfoLine(
+                    '${widget.room.roomName}  ${bed.bedName}  '
+                    '${bed.patientName ?? ''}',
+                  ),
+                  const SizedBox(height: 6),
+                  _Chip(label: widget.phase.label, selected: true, onTap: null),
+                  const SizedBox(height: 14),
+                  // 時段或膳食很多時可以捲動,「重拍 / 上傳」固定留在底部。
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _SectionTitle('用餐時段'),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              for (final s in state.timeSlots)
+                                _Chip(
+                                  label:
+                                      '${s.inferredMealType.label} ${s.timeSlotName}',
+                                  selected: s.timeSlotId == _slot?.timeSlotId,
+                                  onTap: () => setState(() {
+                                    _slot = s;
+                                    _meal = state.defaultMealFor(s);
+                                  }),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 14),
+                          _SectionTitle('膳食'),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              for (final m in state.meals)
+                                _Chip(
+                                  label: m.mealName,
+                                  selected: m.mealId == _meal?.mealId,
+                                  onTap: () => setState(() => _meal = m),
+                                ),
+                            ],
+                          ),
+                        ],
                       ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                _SectionTitle('膳食'),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final m in state.meals)
-                      _Chip(
-                        label: m.mealName,
-                        selected: m.mealId == _meal?.mealId,
-                        onTap: () => setState(() => _meal = m),
-                      ),
-                  ],
-                ),
-                const Spacer(),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Text(
-                      _error!,
-                      key: const Key('upload-error'),
-                      style: AppText.size(22, color: AppColors.error),
                     ),
                   ),
-                Row(
-                  children: [
-                    PrimaryButton(
-                      key: const Key('retake'),
-                      label: '重拍',
-                      width: 150,
-                      height: 78,
-                      fontSize: 34,
-                      background: AppColors.periwinkle,
-                      onPressed: busy ? null : _retake,
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: PrimaryButton(
-                        key: const Key('upload'),
-                        label: '上傳',
-                        height: 78,
-                        fontSize: 38,
-                        loading: state.uploading,
-                        onPressed: busy ? null : _upload,
+                  const SizedBox(height: 8),
+                  if (_error != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        _error!,
+                        key: const Key('upload-error'),
+                        style: AppText.size(22, color: AppColors.error),
                       ),
                     ),
-                  ],
-                ),
-              ],
+                  Row(
+                    children: [
+                      PrimaryButton(
+                        key: const Key('retake'),
+                        label: '重拍',
+                        width: 150,
+                        height: 78,
+                        fontSize: 34,
+                        background: AppColors.periwinkle,
+                        onPressed: busy ? null : _retake,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: PrimaryButton(
+                          key: const Key('upload'),
+                          label: '上傳',
+                          height: 78,
+                          fontSize: 38,
+                          loading: state.uploading,
+                          onPressed: busy ? null : _upload,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
+}
+
+/// 上傳前的重量提醒:秤的讀數不可信或沒有重量時,讓使用者決定要不要照樣上傳。
+class WeightWarningDialog extends StatelessWidget {
+  const WeightWarningDialog({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) => Dialog(
+    backgroundColor: Colors.white,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+    child: SizedBox(
+      width: 640,
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '請確認重量',
+              key: const Key('weight-warning'),
+              style: AppText.size(38, color: AppColors.orangeText),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              '$message\n可以返回重新秤重或手動輸入,也可以照樣上傳。',
+              style: AppText.size(26, color: Colors.black87),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                PrimaryButton(
+                  key: const Key('weight-warning-back'),
+                  label: '返回',
+                  width: 170,
+                  height: 64,
+                  fontSize: 28,
+                  onPressed: () => Navigator.of(context).pop(false),
+                ),
+                const SizedBox(width: 12),
+                PrimaryButton(
+                  key: const Key('weight-warning-upload'),
+                  label: '照樣上傳',
+                  width: 190,
+                  height: 64,
+                  fontSize: 26,
+                  background: AppColors.periwinkle,
+                  onPressed: () => Navigator.of(context).pop(true),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
 }
 
 /// 照片上方的品質警示 (使用者選擇「仍要使用」時提醒)。
@@ -357,7 +466,11 @@ class _QualityBanner extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Row(
         children: [
-          const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 24),
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: Colors.white,
+            size: 24,
+          ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
@@ -492,7 +605,7 @@ class _SmallButton extends StatelessWidget {
         borderRadius: radius,
         onTap: loading ? null : onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           child: loading
               ? const SizedBox.square(
                   dimension: 22,
@@ -549,7 +662,7 @@ class _Chip extends StatelessWidget {
         borderRadius: radius,
         onTap: onTap,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
           child: Text(
             label,
             style: AppText.size(
@@ -572,9 +685,18 @@ class UploadResultDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (mascot, color) = switch (outcome.status) {
-      UploadOutcomeStatus.synced => (AppAssets.mascotPixelHappy, AppColors.success),
-      UploadOutcomeStatus.queued => (AppAssets.mascotPixelWorried, AppColors.orangeText),
-      UploadOutcomeStatus.failed => (AppAssets.mascotPixelDizzy, AppColors.error),
+      UploadOutcomeStatus.synced => (
+        AppAssets.mascotPixelHappy,
+        AppColors.success,
+      ),
+      UploadOutcomeStatus.queued => (
+        AppAssets.mascotPixelWorried,
+        AppColors.orangeText,
+      ),
+      UploadOutcomeStatus.failed => (
+        AppAssets.mascotPixelDizzy,
+        AppColors.error,
+      ),
     };
     final weight = outcome.record.weightG;
     return Dialog(

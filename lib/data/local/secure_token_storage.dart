@@ -73,12 +73,15 @@ class FileTokenStorage implements TokenStorage {
   @override
   Future<void> write(AuthToken token) async {
     final f = await _file();
-    await f.writeAsString(jsonEncode(token.toJson()), flush: true);
+    // 先建立空檔並改成 0600 再寫入,token 不會有一段時間以預設權限躺在磁碟上。
     if (Platform.isLinux || Platform.isMacOS) {
-      try {
-        await Process.run('chmod', ['600', f.path]);
-      } catch (_) {}
+      if (!await f.exists()) await f.create();
+      final r = await Process.run('chmod', ['600', f.path]);
+      if (r.exitCode != 0) {
+        Log.e('chmod 600 ${f.path} failed: ${r.stderr}');
+      }
     }
+    await f.writeAsString(jsonEncode(token.toJson()), flush: true);
   }
 
   @override
@@ -92,6 +95,9 @@ class FileTokenStorage implements TokenStorage {
 ///
 /// ARCHITECTURE.md §5.1:flutter_secure_storage 在 Linux 依賴 keyring,
 /// 機台沒有桌面環境時會丟 PlatformException,這裡確保配對狀態不會因此消失。
+///
+/// keyring 可能這次能用、下次不能用 (例如開機時 kiosk 比 keyring daemon 早起來),
+/// 所以讀取時兩邊都看,清除時兩邊都清,寫入成功後清掉另一邊的舊 token。
 class FallbackTokenStorage implements TokenStorage {
   FallbackTokenStorage({TokenStorage? primary, TokenStorage? fallback})
     : _primary = primary ?? SecureTokenStorage(),
@@ -119,14 +125,24 @@ class FallbackTokenStorage implements TokenStorage {
   }
 
   @override
-  Future<AuthToken?> read() => _run((s) => s.read(), what: 'read');
+  Future<AuthToken?> read() async {
+    final token = await _run((s) => s.read(), what: 'read');
+    if (token != null || _useFallback) return token;
+    // keyring 可用但沒有 token:可能是之前 keyring 失敗時寫進檔案的。
+    return _fallback.read();
+  }
 
   @override
-  Future<void> write(AuthToken token) =>
-      _run((s) => s.write(token), what: 'write');
+  Future<void> write(AuthToken token) async {
+    await _run((s) => s.write(token), what: 'write');
+    if (!_useFallback) await _fallback.clear();
+  }
 
   @override
-  Future<void> clear() => _run((s) => s.clear(), what: 'clear');
+  Future<void> clear() async {
+    await _run((s) => s.clear(), what: 'clear');
+    if (!_useFallback) await _fallback.clear();
+  }
 }
 
 /// 測試用記憶體實作。

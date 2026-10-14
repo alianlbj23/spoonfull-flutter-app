@@ -90,7 +90,18 @@ class HardwareService {
   /// 設定的相機能真的拍照;桌面平台的 picker 只能選檔,這時不必提供兩種選擇。
   bool get cameraAvailable {
     final cam = camera;
-    return cam is! ImagePickerCameraService || cam.opensCamera;
+    final available = cam is! ImagePickerCameraService || cam.opensCamera;
+    // 自動偵測沒找到相機 (例如開機時 USB 相機還沒接好):不要記住這個結果,
+    // 下次再偵測一次,相機接上後「拍照」按鈕才會回來。
+    if (!available) _forgetDetectedCamera();
+    return available;
+  }
+
+  /// 相機來源是「自動」時丟掉偵測結果,下次使用時重新偵測。
+  void _forgetDetectedCamera() {
+    if (_fixedCamera == null && config.camera.source == CameraSource.auto) {
+      _camera = null;
+    }
   }
 
   ScaleService get scale => _scale ??= ScaleService(
@@ -108,14 +119,15 @@ class HardwareService {
     if (_fixedScale == null) _scale = null;
   }
 
-  Future<Directory> _imagesDir() async {
+  /// 餐點照片的資料夾 (不存在時建立)。
+  Future<Directory> imagesDirectory() async {
     final dir = Directory(p.join((await _documentsDir()).path, 'meal_images'));
     await dir.create(recursive: true);
     return dir;
   }
 
   Future<String> _newImagePath() async =>
-      p.join((await _imagesDir()).path, '${const Uuid().v4()}.jpg');
+      p.join((await imagesDirectory()).path, '${const Uuid().v4()}.jpg');
 
   /// 拍照 (擷取 → 縮放壓縮 → 品質檢查) 並同時讀秤。
   /// [method] 為 [CaptureMethod.file] 時改由使用者選擇圖片檔案,後續處理相同。
@@ -130,7 +142,15 @@ class HardwareService {
 
     final target = await _newImagePath();
     final source = method == CaptureMethod.file ? filePicker : camera;
-    final rawPath = await source.capture('$target.raw');
+    final String? rawPath;
+    try {
+      rawPath = await source.capture('$target.raw');
+    } on Object {
+      // 仍等秤結束,避免裝置握把未釋放;相機可能被拔掉或換了裝置,下次重新偵測。
+      await weightFuture;
+      if (method == CaptureMethod.camera) _forgetDetectedCamera();
+      rethrow;
+    }
     if (rawPath == null) {
       // 使用者取消:仍等秤結束,避免裝置握把未釋放。
       await weightFuture;
@@ -183,9 +203,7 @@ class HardwareService {
 
   /// 拍攝「空秤參考照」:秤上不放任何東西,之後用來判斷餐盒是否在畫面。
   Future<String> captureReference() async {
-    final dir = Directory(
-      p.join((await _documentsDir()).path, 'reference'),
-    );
+    final dir = Directory(p.join((await _documentsDir()).path, 'reference'));
     await dir.create(recursive: true);
     final target = p.join(dir.path, 'empty_scale.jpg');
     final rawPath = await camera.capture('$target.raw');

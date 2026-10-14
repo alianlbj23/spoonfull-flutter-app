@@ -37,7 +37,9 @@ class _MainShellState extends State<MainShell>
   void initState() {
     super.initState();
     _device = context.read<DeviceState>()..addListener(_onDeviceChanged);
-    context.read<RecordState>().loadAll();
+    // loadAll 會立刻 notifyListeners,不能在 build 期間 (initState) 呼叫。
+    final records = context.read<RecordState>();
+    WidgetsBinding.instance.addPostFrameCallback((_) => records.loadAll());
   }
 
   @override

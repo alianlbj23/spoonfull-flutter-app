@@ -88,7 +88,10 @@ void main() {
     });
 
     test('kilograms, pounds and bare numbers', () {
-      expect(LineScaleReader.parseLine('0.1234 kg')!.grams, closeTo(123.4, 0.001));
+      expect(
+        LineScaleReader.parseLine('0.1234 kg')!.grams,
+        closeTo(123.4, 0.001),
+      );
       expect(LineScaleReader.parseLine('1.0 lb')!.grams, closeTo(453.59, 0.01));
       expect(LineScaleReader.parseLine('  -5 ')!.grams, -5);
       expect(LineScaleReader.parseLine('W: 87g')!.grams, 87);
@@ -102,6 +105,17 @@ void main() {
     test('garbage lines are ignored', () {
       expect(LineScaleReader.parseLine(''), isNull);
       expect(LineScaleReader.parseLine('ready'), isNull);
+    });
+
+    test('HX711 bridge error lines are not read as a weight', () {
+      // 以前會取到 HX711 的 711,連續幾筆後還被判定為穩定的 711 g。
+      expect(LineScaleReader.parseLine('ERR,HX711 not ready'), isNull);
+      expect(LineScaleReader.parseLine('sensor HX711 busy'), isNull);
+    });
+
+    test('stability flags are matched as whole fields', () {
+      expect(LineScaleReader.parseLine('UNSTABLE, 120.0 g')!.stable, isFalse);
+      expect(LineScaleReader.parseLine('ST,GS,  5.0 g')!.stable, isTrue);
     });
   });
 
@@ -174,10 +188,7 @@ void main() {
 
   test('detectStable requires a full window within tolerance', () {
     final recent = [_r(1), _r(2), _r(3)];
-    expect(
-      ScaleService.detectStable(recent, window: 5, toleranceG: 2),
-      isNull,
-    );
+    expect(ScaleService.detectStable(recent, window: 5, toleranceG: 2), isNull);
     expect(
       ScaleService.detectStable(
         [_r(10), _r(10.5), _r(9.8), _r(10.2), _r(10.1)],

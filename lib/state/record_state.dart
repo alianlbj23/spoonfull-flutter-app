@@ -9,22 +9,46 @@ import '../data/models/meal_data.dart';
 import '../data/models/room_data.dart';
 import '../data/models/weight_reading.dart';
 import '../services/app_services.dart';
+import '../core/utils/logger.dart';
 import '../services/hardware/hardware_service.dart';
+import '../services/local_storage_service.dart';
 import '../services/record_service.dart';
 
 /// 病房/床位/膳食資料與紀錄上傳狀態。
 class RecordState extends ChangeNotifier {
   RecordState(this._services) {
-    _sub = _services.sync.snapshots.listen((s) {
-      // 同步結束後重新讀取快取,讓畫面顯示最新資料。
-      if (_wasSyncing && !s.isSyncing) loadAll();
-      _wasSyncing = s.isSyncing;
-    });
+    _sub = _services.storage.changes.listen(_onStorageChanged);
   }
 
   final AppServices _services;
-  StreamSubscription<Object?>? _sub;
-  bool _wasSyncing = false;
+  StreamSubscription<String>? _sub;
+  bool _reloadScheduled = false;
+  bool _disposed = false;
+
+  /// 紀錄 (meal_records) 每變動一次加一;顯示紀錄的畫面 watch 這個值來重新讀取。
+  int recordsVersion = 0;
+
+  /// 照片確認畫面開著 (照片已拍、還沒上傳)。這時不安裝更新,否則照片會丟掉。
+  bool confirmingCapture = false;
+
+  /// 本機資料一變動 (同步完成、清除快取、紀錄上傳成功) 就更新畫面。
+  /// 一次同步會連續寫入病房 / 床位 / 膳食,合併成一次重新讀取。
+  void _onStorageChanged(String dataset) {
+    if (dataset == LocalStorageService.datasetRecords) {
+      recordsVersion++;
+      notifyListeners();
+      return;
+    }
+    if (_reloadScheduled) return;
+    _reloadScheduled = true;
+    scheduleMicrotask(() {
+      _reloadScheduled = false;
+      if (_disposed) return;
+      unawaited(
+        loadAll().catchError((Object e) => Log.e('cache reload failed', e)),
+      );
+    });
+  }
 
   List<RoomData> rooms = const [];
   final Map<String, List<BedData>> _beds = {};
@@ -43,8 +67,7 @@ class RecordState extends ChangeNotifier {
   bool get cameraAvailable => _services.hardware.cameraAvailable;
 
   /// 品質檢查是否會提示重拍。
-  bool get qualityCheckEnabled =>
-      _services.hardware.config.qualityCheckEnabled;
+  bool get qualityCheckEnabled => _services.hardware.config.qualityCheckEnabled;
 
   List<BedData> bedsFor(String roomId) => _beds[roomId] ?? const [];
 
@@ -144,11 +167,11 @@ class RecordState extends ChangeNotifier {
         weightSource: weightSource,
         quality: quality,
       );
+      // 佇列在背景處理:裡面若有其他待傳項目,不該讓使用者等它們全部傳完。
       if (outcome.status == UploadOutcomeStatus.queued) {
-        await _services.sync.processQueue();
-      } else {
-        await _services.sync.refreshStatus();
+        unawaited(_services.sync.processQueue());
       }
+      await _services.sync.refreshStatus();
       return outcome;
     } finally {
       uploading = false;
@@ -164,13 +187,15 @@ class RecordState extends ChangeNotifier {
       record,
       _services.storage.deviceConfig.deviceId,
     );
-    await _services.sync.processQueue();
+    await _services.sync.refreshStatus();
+    unawaited(_services.sync.processQueue());
   }
 
   String errorMessage(Object e) => _services.errors.userMessage(e);
 
   @override
   void dispose() {
+    _disposed = true;
     _sub?.cancel();
     super.dispose();
   }

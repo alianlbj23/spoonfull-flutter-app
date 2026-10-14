@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -12,11 +13,46 @@ import '../../core/errors/app_exception.dart';
 import '../../core/utils/logger.dart';
 import '../../data/models/hardware_config.dart';
 
-typedef ProcessRunner =
-    Future<ProcessResult> Function(String executable, List<String> arguments);
+typedef ProcessRunner = Future<ProcessResult> Function(
+  String executable,
+  List<String> arguments,
+);
 
-Future<ProcessResult> _defaultRunner(String exe, List<String> args) =>
-    Process.run(exe, args);
+/// 執行外部擷取程式。超過 [AppConstants.captureTimeout] 就砍掉子行程再丟
+/// [TimeoutException]:只放棄等待的話,卡住的程式會一直佔著相機,之後每次拍照都失敗。
+Future<ProcessResult> _defaultRunner(String exe, List<String> args) async {
+  final process = await Process.start(exe, args);
+  final out = process.stdout.transform(systemEncoding.decoder).join();
+  final err = process.stderr.transform(systemEncoding.decoder).join();
+  final int code;
+  try {
+    code = await process.exitCode.timeout(AppConstants.captureTimeout);
+  } on TimeoutException {
+    process.kill(ProcessSignal.sigkill);
+    // 等它真的結束,相機裝置才會釋放。
+    await process.exitCode.timeout(
+      const Duration(seconds: 3),
+      onTimeout: () => -1,
+    );
+    out.ignore();
+    err.ignore();
+    rethrow;
+  }
+  return ProcessResult(process.pid, code, await out, await err);
+}
+
+/// 注入的 runner 沒有自己的逾時時的保險 (預設 runner 會先逾時並砍掉子行程)。
+const _runnerGrace = Duration(seconds: 5);
+
+/// 給現場人員看的訊息固定為三種;技術細節 ([detail]) 只寫進 log。
+AppException _cameraError(String code, Object? detail) {
+  Log.e('camera $code', detail);
+  return AppException(AppErrorType.localValidation, switch (code) {
+    'CAMERA_UNAVAILABLE' => '這台機器的相機還沒設定好,請聯絡管理員',
+    'CAMERA_TIMEOUT' => '相機沒有回應,請確認相機的線有接好,再試一次',
+    _ => '相機沒有拍到畫面,請確認相機的線有接好,再試一次',
+  }, code: code);
+}
 
 /// 相機擷取:拍一張原始照片寫到指定路徑。壓縮與品質檢查由 [ImagePipeline] 負責。
 abstract class CameraService {
@@ -101,8 +137,7 @@ class GStreamerCameraService extends CameraService {
   final ProcessRunner _run;
 
   @override
-  String get description =>
-      settings.source == CameraSource.nvargus
+  String get description => settings.source == CameraSource.nvargus
       ? 'GStreamer nvarguscamerasrc sensor-id=${settings.device}'
       : 'GStreamer v4l2src device=${settings.device}';
 
@@ -114,12 +149,21 @@ class GStreamerCameraService extends CameraService {
       final sensor = int.tryParse(settings.device) ?? 0;
       return [
         '-q',
-        'nvarguscamerasrc', 'sensor-id=$sensor', 'num-buffers=$frames', '!',
-        'video/x-raw(memory:NVMM),width=$w,height=$h,framerate=30/1', '!',
-        'nvvidconv', '!',
-        'video/x-raw,format=I420', '!',
-        'jpegenc', 'quality=92', '!',
-        'multifilesink', 'location=$pattern',
+        'nvarguscamerasrc',
+        'sensor-id=$sensor',
+        'num-buffers=$frames',
+        '!',
+        'video/x-raw(memory:NVMM),width=$w,height=$h,framerate=30/1',
+        '!',
+        'nvvidconv',
+        '!',
+        'video/x-raw,format=I420',
+        '!',
+        'jpegenc',
+        'quality=92',
+        '!',
+        'multifilesink',
+        'location=$pattern',
       ];
     }
     final caps = settings.mjpeg
@@ -127,13 +171,24 @@ class GStreamerCameraService extends CameraService {
         : 'video/x-raw,width=$w,height=$h';
     return [
       '-q',
-      'v4l2src', 'device=${settings.device}', 'num-buffers=$frames', '!',
-      caps, '!',
-      if (settings.mjpeg) ...['jpegparse', '!'] else ...[
-        'videoconvert', '!',
-        'jpegenc', 'quality=92', '!',
+      'v4l2src',
+      'device=${settings.device}',
+      'num-buffers=$frames',
+      '!',
+      caps,
+      '!',
+      if (settings.mjpeg) ...[
+        'jpegparse',
+        '!',
+      ] else ...[
+        'videoconvert',
+        '!',
+        'jpegenc',
+        'quality=92',
+        '!',
       ],
-      'multifilesink', 'location=$pattern',
+      'multifilesink',
+      'location=$pattern',
     ];
   }
 
@@ -146,42 +201,52 @@ class GStreamerCameraService extends CameraService {
     final stamp = DateTime.now().microsecondsSinceEpoch;
     final pattern = p.join(dir.path, 'cap_${stamp}_%03d.jpg');
 
-    ProcessResult result;
+    List<File> frames() =>
+        dir
+            .listSync()
+            .whereType<File>()
+            .where((f) => p.basename(f.path).startsWith('cap_${stamp}_'))
+            .toList()
+          ..sort((a, b) => a.path.compareTo(b.path));
+    void discard() {
+      for (final f in frames()) {
+        try {
+          f.deleteSync();
+        } catch (_) {}
+      }
+    }
+
+    final ProcessResult result;
     try {
       result = await _run(
         'gst-launch-1.0',
         pipelineArgs(pattern),
-      ).timeout(AppConstants.captureTimeout);
+      ).timeout(AppConstants.captureTimeout + _runnerGrace);
     } on ProcessException catch (e) {
-      throw AppException(
-        AppErrorType.localValidation,
-        '找不到 gst-launch-1.0,請安裝 GStreamer (${e.message})',
-        code: 'CAMERA_UNAVAILABLE',
-      );
+      throw _cameraError('CAMERA_UNAVAILABLE', 'gst-launch-1.0: ${e.message}');
+    } on TimeoutException catch (e) {
+      discard();
+      throw _cameraError('CAMERA_TIMEOUT', e);
     } on Object catch (e) {
-      throw AppException(
-        AppErrorType.localValidation,
-        '相機擷取逾時或失敗: $e',
-        code: 'CAMERA_FAILED',
-      );
+      discard();
+      throw _cameraError('CAMERA_FAILED', e);
     }
 
-    final frames = dir
-        .listSync()
-        .whereType<File>()
-        .where((f) => p.basename(f.path).startsWith('cap_${stamp}_'))
-        .toList()
-      ..sort((a, b) => a.path.compareTo(b.path));
-    if (frames.isEmpty) {
-      final err = (result.stderr ?? '').toString().trim();
-      throw AppException(
-        AppErrorType.localValidation,
-        '相機沒有輸出影像${err.isEmpty ? '' : ': $err'}',
-        code: 'CAMERA_FAILED',
+    final captured = frames();
+    // 相機中途斷線時 gst-launch 會以錯誤結束,只留下前幾張暖機幀 (曝光還沒穩定),
+    // 不能拿來當成品。
+    final expected = math.max(1, settings.warmupFrames + 1);
+    if (captured.isEmpty ||
+        (result.exitCode != 0 && captured.length < expected)) {
+      discard();
+      throw _cameraError(
+        'CAMERA_FAILED',
+        'gst-launch-1.0 exit ${result.exitCode}, ${captured.length}/$expected '
+            'frames: ${(result.stderr ?? '').toString().trim()}',
       );
     }
-    final last = frames.removeLast();
-    for (final f in frames) {
+    final last = captured.removeLast();
+    for (final f in captured) {
       try {
         f.deleteSync();
       } catch (_) {}
@@ -211,12 +276,17 @@ class LibcameraCameraService extends CameraService {
 
   List<String> args(String out) => [
     '-n',
-    '-t', '1500',
-    '--width', '${settings.width}',
-    '--height', '${settings.height}',
-    '-q', '92',
+    '-t',
+    '1500',
+    '--width',
+    '${settings.width}',
+    '--height',
+    '${settings.height}',
+    '-q',
+    '92',
     if (int.tryParse(settings.device) case final idx?) ...['--camera', '$idx'],
-    '-o', out,
+    '-o',
+    out,
   ];
 
   @override
@@ -224,22 +294,32 @@ class LibcameraCameraService extends CameraService {
     final out = p.setExtension(outputPath, '.jpg');
     await File(out).parent.create(recursive: true);
     Object? lastError;
+    var found = false;
     for (final exe in ['rpicam-still', 'libcamera-still']) {
       try {
-        final r = await _run(exe, args(out)).timeout(AppConstants.captureTimeout);
+        final r = await _run(
+          exe,
+          args(out),
+        ).timeout(AppConstants.captureTimeout + _runnerGrace);
+        found = true;
         if (r.exitCode == 0 && File(out).existsSync()) return out;
-        lastError = (r.stderr ?? r.stdout ?? '').toString().trim();
+        lastError =
+            '$exe exit ${r.exitCode}: '
+            '${(r.stderr ?? r.stdout ?? '').toString().trim()}';
       } on ProcessException catch (e) {
-        lastError = e.message;
-        continue;
+        // 這個指令沒裝,試下一個。
+        lastError = '$exe: ${e.message}';
+      } on TimeoutException catch (e) {
+        // 相機卡住:換一個指令也一樣,不要讓使用者再等一輪。
+        throw _cameraError('CAMERA_TIMEOUT', '$exe: $e');
       } on Object catch (e) {
+        found = true;
         lastError = e;
       }
     }
-    throw AppException(
-      AppErrorType.localValidation,
-      '相機擷取失敗: $lastError',
-      code: 'CAMERA_FAILED',
+    throw _cameraError(
+      found ? 'CAMERA_FAILED' : 'CAMERA_UNAVAILABLE',
+      lastError,
     );
   }
 }
@@ -268,10 +348,7 @@ class ImagePickerCameraService extends CameraService {
     if (opensCamera && _isMobile) {
       final status = await Permission.camera.request();
       if (!status.isGranted) {
-        throw const AppException(
-          AppErrorType.localValidation,
-          '需要相機權限才能拍攝照片',
-        );
+        throw const AppException(AppErrorType.localValidation, '需要相機權限才能拍攝照片');
       }
     }
     final picked = await _picker.pickImage(
@@ -364,7 +441,10 @@ class MockCameraService extends CameraService {
     final out = p.setExtension(outputPath, '.jpg');
     await File(out).parent.create(recursive: true);
     await File(out).writeAsBytes(
-      img.encodeJpg(render(width, height, withTray: withTray, seed: seed), quality: 92),
+      img.encodeJpg(
+        render(width, height, withTray: withTray, seed: seed),
+        quality: 92,
+      ),
       flush: true,
     );
     return out;
@@ -381,7 +461,14 @@ class MockCameraService extends CameraService {
     if (withTray) {
       final x0 = (width * 0.22).round(), y0 = (height * 0.18).round();
       final x1 = (width * 0.78).round(), y1 = (height * 0.82).round();
-      img.fillRect(image, x1: x0, y1: y0, x2: x1, y2: y1, color: img.ColorRgb8(245, 245, 240));
+      img.fillRect(
+        image,
+        x1: x0,
+        y1: y0,
+        x2: x1,
+        y2: y1,
+        color: img.ColorRgb8(245, 245, 240),
+      );
       final mx = (x0 + x1) ~/ 2, my = (y0 + y1) ~/ 2;
       final pad = (width * 0.015).round();
       final colors = [
@@ -398,13 +485,44 @@ class MockCameraService extends CameraService {
       ];
       // 餐盒邊框與分隔線 (深色),模擬真實餐盒的強邊緣
       final rim = img.ColorRgb8(70, 70, 75);
-      img.drawRect(image, x1: x0, y1: y0, x2: x1, y2: y1, color: rim, thickness: 3);
-      img.drawLine(image, x1: mx, y1: y0, x2: mx, y2: y1, color: rim, thickness: 3);
-      img.drawLine(image, x1: x0, y1: my, x2: x1, y2: my, color: rim, thickness: 3);
+      img.drawRect(
+        image,
+        x1: x0,
+        y1: y0,
+        x2: x1,
+        y2: y1,
+        color: rim,
+        thickness: 3,
+      );
+      img.drawLine(
+        image,
+        x1: mx,
+        y1: y0,
+        x2: mx,
+        y2: y1,
+        color: rim,
+        thickness: 3,
+      );
+      img.drawLine(
+        image,
+        x1: x0,
+        y1: my,
+        x2: x1,
+        y2: my,
+        color: rim,
+        thickness: 3,
+      );
       final cellCount = (width * height / 2500).round();
       for (var i = 0; i < cells.length; i++) {
         final (cx0, cy0, cx1, cy1) = cells[i];
-        img.fillRect(image, x1: cx0, y1: cy0, x2: cx1, y2: cy1, color: colors[i]);
+        img.fillRect(
+          image,
+          x1: cx0,
+          y1: cy0,
+          x2: cx1,
+          y2: cy1,
+          color: colors[i],
+        );
         final rnd = math.Random(seed + i);
         // 食物紋理:大量明暗不一的小圓 (飯粒、菜葉、肉塊)
         for (var k = 0; k < cellCount; k++) {

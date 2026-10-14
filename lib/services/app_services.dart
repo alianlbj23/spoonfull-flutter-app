@@ -52,6 +52,7 @@ class AppServices {
     ConnectivityService? connectivity,
     HardwareService Function(LocalStorageService storage)? hardwareBuilder,
     RealtimeService? realtime,
+    UpdateService? updates,
   }) async {
     final db = database ?? await AppDatabase.open();
     final storage = LocalStorageService(
@@ -120,7 +121,7 @@ class AppServices {
       hardware: hardware,
       records: records,
       sync: sync,
-      updates: UpdateService(connectivity: conn),
+      updates: updates ?? UpdateService(connectivity: conn),
       database: db,
     );
   }
@@ -129,6 +130,7 @@ class AppServices {
     await updates.dispose();
     await sync.dispose();
     await hardware.dispose();
+    await storage.dispose();
     errors.dispose();
     await database.close();
   }

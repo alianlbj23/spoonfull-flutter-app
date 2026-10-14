@@ -1,7 +1,9 @@
 import 'dart:io';
 
+import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
+import '../config/app_constants.dart';
 import '../core/errors/app_exception.dart';
 import '../core/utils/logger.dart';
 import '../core/utils/time_utils.dart';
@@ -12,6 +14,7 @@ import '../data/models/bed_data.dart';
 import '../data/models/image_quality.dart';
 import '../data/models/local_meal_record.dart';
 import '../data/models/meal_data.dart';
+import '../data/models/offline_queue_item.dart';
 import '../data/models/weight_reading.dart';
 import 'connectivity_service.dart';
 import 'error_handling_service.dart';
@@ -45,8 +48,6 @@ class RecordService {
   final ConnectivityService _connectivity;
   final ErrorHandlingService _errors;
   final HardwareService _hardware;
-
-  HardwareService get hardware => _hardware;
 
   /// 拍照 (擷取 → 壓縮 → 品質檢查) 並同時讀秤。使用者取消時回傳 null。
   Future<CaptureResult?> capture({
@@ -100,15 +101,15 @@ class RecordService {
       createdAt: now,
       updatedAt: now,
     );
-    await _storage.saveRecord(record);
     final upload = uploadFor(record, deviceId);
 
-    // 3. 離線 → 加入佇列
+    // 3. 離線 → 加入佇列 (紀錄與佇列項目同一個 transaction)
     if (!await _connectivity.isOnline()) {
       await _queue.enqueueMealRecord(
         localId: record.localId,
         upload: upload,
         immediate: true,
+        record: record,
       );
       return UploadOutcome(
         record,
@@ -117,22 +118,25 @@ class RecordService {
       );
     }
 
-    // 4. 在線 → 立即上傳
+    // 4. 在線 → 立即上傳。佇列項目先以 processing 寫入:上傳到一半斷電或當機,
+    //    下次啟動會把它放回佇列補傳 (server 以 client_record_id 去重)。
+    final item = await _queue.enqueueMealRecord(
+      localId: record.localId,
+      upload: upload,
+      record: record,
+      status: QueueStatus.processing,
+    );
+    final MealRecordResult result;
     try {
-      final result = await _api.uploadMealRecord(upload);
-      record = await applyResult(record, result);
-      return UploadOutcome(record, UploadOutcomeStatus.synced, '上傳成功');
+      result = await _api.uploadMealRecord(upload);
     } on Object catch (error) {
       final e = _errors.normalize(error);
-      if (e.isRetryable || e.type == AppErrorType.unauthorized) {
-        await _queue.enqueueMealRecord(
-          localId: record.localId,
-          upload: upload,
-        );
+      final queued = await _queue.markFailed(item, e);
+      if (queued.status == QueueStatus.pending) {
         record = record.copyWith(
           syncAttempts: 1,
           updatedAt: nowUnix(),
-          errorMessage: e.message,
+          errorMessage: _errors.userMessage(e),
         );
         await _storage.saveRecord(record);
         return UploadOutcome(
@@ -148,6 +152,10 @@ class RecordService {
         _errors.userMessage(e),
       );
     }
+    // server 已收下。之後的本機寫入若失敗,佇列項目仍在,下次啟動會補做。
+    record = await applyResult(record, result);
+    await _queue.markCompleted(item);
+    return UploadOutcome(record, UploadOutcomeStatus.synced, '上傳成功');
   }
 
   MealRecordUpload uploadFor(LocalMealRecord r, String deviceId) =>
@@ -230,5 +238,81 @@ class RecordService {
         clearError: true,
       ),
     );
+  }
+
+  /// 啟動時的對帳:pending 的紀錄一定要有佇列項目,否則永遠不會上傳
+  /// (舊版在線直傳到一半被關掉會留下這種紀錄)。[revived] 是佇列裡被放回
+  /// pending 的項目,對應的紀錄也改回 pending。
+  Future<void> reconcileQueue(
+    String deviceId, {
+    List<String> revived = const [],
+  }) async {
+    for (final localId in revived) {
+      final record = await _storage.getRecord(localId);
+      if (record == null || record.syncStatus != SyncStatus.failed) continue;
+      await _storage.saveRecord(
+        record.copyWith(syncStatus: SyncStatus.pending, updatedAt: nowUnix()),
+      );
+    }
+    for (final record in await _storage.getRecordsByStatus(
+      SyncStatus.pending,
+    )) {
+      if (await _storage.findQueueItemForRecord(record.localId) != null) {
+        continue;
+      }
+      Log.i('record ${record.localId} had no queue item, re-queued');
+      await _queue.enqueueMealRecord(
+        localId: record.localId,
+        upload: uploadFor(record, deviceId),
+        immediate: true,
+      );
+    }
+  }
+
+  /// 清掉過期的本機資料,避免照片把機台的儲存空間寫滿:
+  /// 已上傳超過 [AppConstants.syncedImageRetention] 的照片檔、
+  /// 已上傳超過 [AppConstants.syncedRecordRetention] 的紀錄,
+  /// 以及照片資料夾裡沒有紀錄指向的舊檔。還沒上傳的紀錄與照片不會動。
+  /// 回傳刪除的檔案數。
+  Future<int> purgeExpired({DateTime? now}) async {
+    final t = toUnix(now ?? DateTime.now());
+    var deleted = 0;
+    Future<void> remove(File f) async {
+      try {
+        if (await f.exists()) {
+          await f.delete();
+          deleted++;
+        }
+      } on FileSystemException catch (e) {
+        Log.i('purge: cannot delete ${f.path}: $e');
+      }
+    }
+
+    final imageCutoff = t - AppConstants.syncedImageRetention.inSeconds;
+    final recordCutoff = t - AppConstants.syncedRecordRetention.inSeconds;
+    final expired = await _storage.getRecordsByStatus(
+      SyncStatus.synced,
+      updatedBefore: imageCutoff,
+    );
+    for (final r in expired) {
+      await remove(File(r.imagePath));
+      if (r.updatedAt < recordCutoff) await _storage.deleteRecord(r.localId);
+    }
+
+    final dir = await _hardware.imagesDirectory();
+    final referenced = {
+      for (final path in await _storage.recordImagePaths()) p.normalize(path),
+    };
+    final orphanCutoff = (now ?? DateTime.now()).subtract(
+      AppConstants.orphanImageRetention,
+    );
+    await for (final entity in dir.list()) {
+      if (entity is! File) continue;
+      if (referenced.contains(p.normalize(entity.path))) continue;
+      if ((await entity.lastModified()).isAfter(orphanCutoff)) continue;
+      await remove(entity);
+    }
+    if (deleted > 0) Log.i('purge: removed $deleted old image file(s)');
+    return deleted;
   }
 }

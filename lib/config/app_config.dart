@@ -41,13 +41,6 @@ class AppConfig {
     _ => AppEnvironment.dev,
   };
 
-  /// 預設 BASE_URL;使用者在設定畫面輸入伺服器位址後會覆蓋此值。
-  static String get defaultBaseUrl => switch (environment) {
-    AppEnvironment.dev => 'http://dev-server.local/',
-    AppEnvironment.test => 'https://test-server.example.com/',
-    AppEnvironment.prod => 'https://prod-server.example.com/',
-  };
-
   static LogLevel get logLevel => switch (environment) {
     AppEnvironment.dev => LogLevel.debug,
     AppEnvironment.test => LogLevel.info,

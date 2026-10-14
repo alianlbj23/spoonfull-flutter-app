@@ -143,7 +143,7 @@ void main() {
     expect(await env.services.queue.pendingItems(), isEmpty);
   });
 
-  test('retryable failure uses backoff, gives up after max attempts', () async {
+  test('retryable failure backs off and never gives up', () async {
     final queue = env.services.queue;
     final storage = env.services.storage;
     final now = nowUnix();
@@ -166,20 +166,19 @@ void main() {
     );
     expect(item.nextAttemptAt - now, AppConstants.retryDelays[0].inSeconds);
 
-    for (var i = 1; i <= AppConstants.maxRetryAttempts; i++) {
+    // server 停機再久都留在佇列;退避到表尾後固定用最後一格 (30 分鐘)。
+    final delays = AppConstants.retryDelays;
+    for (var i = 1; i <= delays.length + 3; i++) {
       item = await queue.markFailed(item, _network);
       expect(item.attempts, i);
-      if (i < AppConstants.maxRetryAttempts) {
-        expect(item.status, QueueStatus.pending);
-        expect(
-          item.nextAttemptAt - nowUnix(),
-          closeTo(AppConstants.retryDelays[i].inSeconds, 1),
-        );
-      }
+      expect(item.status, QueueStatus.pending);
+      expect(
+        item.nextAttemptAt - nowUnix(),
+        closeTo(delays[i.clamp(0, delays.length - 1)].inSeconds, 1),
+      );
     }
-    expect(item.status, QueueStatus.failed);
 
-    // 使用者手動重試 → 重新排入
+    // 使用者手動重試 → 立即重新排入
     final retried = await queue.retry('L1');
     expect(retried!.status, QueueStatus.pending);
     expect(retried.attempts, 0);
@@ -213,8 +212,11 @@ void main() {
     );
     final path = await _writePng(tmp, 640, 480);
     final outcome = await createRecord(path);
-    expect(outcome.status, UploadOutcomeStatus.queued,
-        reason: '401 時保留紀錄於佇列,重新配對後可上傳');
+    expect(
+      outcome.status,
+      UploadOutcomeStatus.queued,
+      reason: '401 時保留紀錄於佇列,重新配對後可上傳',
+    );
 
     // 等待退避時間到期後由佇列處理
     final items = await env.services.queue.pendingItems();
@@ -228,5 +230,145 @@ void main() {
     await pumpEventQueue();
     expect(unauthorized, isTrue);
     await sub.cancel();
+  });
+
+  test('online upload leaves no queue item behind', () async {
+    final path = await _writePng(tmp, 640, 480);
+    final outcome = await createRecord(path);
+    expect(outcome.status, UploadOutcomeStatus.synced);
+    expect(await env.services.storage.getQueueItems(), isEmpty);
+  });
+
+  test('upload interrupted by a crash is re-sent on the next start', () async {
+    // 模擬舊版留下的狀態:紀錄是 pending,但沒有佇列項目。
+    final storage = env.services.storage;
+    final now = nowUnix();
+    final path = await _writePng(tmp, 640, 480);
+    await storage.saveRecord(
+      LocalMealRecord(
+        localId: 'orphan',
+        bedId: 'R101-B1',
+        patientId: 'P001',
+        mealId: 'M1',
+        mealTimeSlot: 'T1',
+        beforeAfter: MealPhase.before,
+        imagePath: path,
+        captureTime: now,
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    expect(await storage.findQueueItemForRecord('orphan'), isNull);
+
+    await env.services.records.reconcileQueue('dev');
+    final item = await storage.findQueueItemForRecord('orphan');
+    expect(item, isNotNull);
+    expect(item!.status, QueueStatus.pending);
+  });
+
+  test(
+    'items given up by the old 5-attempt limit go back to the queue',
+    () async {
+      final storage = env.services.storage;
+      final now = nowUnix();
+      final record = LocalMealRecord(
+        localId: 'old-failed',
+        bedId: 'R101-B1',
+        patientId: 'P1',
+        mealId: 'M1',
+        mealTimeSlot: 'T1',
+        beforeAfter: MealPhase.before,
+        imagePath: '/nonexistent.png',
+        captureTime: now,
+        syncStatus: SyncStatus.failed,
+        createdAt: now,
+        updatedAt: now,
+      );
+      await storage.saveRecord(record);
+      final item = await env.services.queue.enqueueMealRecord(
+        localId: 'old-failed',
+        upload: env.services.records.uploadFor(record, 'dev'),
+      );
+      await storage.saveQueueItem(
+        item.copyWith(
+          status: QueueStatus.failed,
+          attempts: AppConstants.legacyMaxRetryAttempts,
+        ),
+      );
+
+      final revived = await env.services.queue.recoverStuckItems();
+      expect(revived, ['old-failed']);
+      await env.services.records.reconcileQueue('dev', revived: revived);
+      expect(
+        (await storage.getRecord('old-failed'))!.syncStatus,
+        SyncStatus.pending,
+      );
+      expect(
+        (await storage.findQueueItemForRecord('old-failed'))!.status,
+        QueueStatus.pending,
+      );
+    },
+  );
+
+  test('unexpected errors show a generic message, not the raw exception', () {
+    final errors = env.services.errors;
+    final e = errors.normalize(const FileSystemException('boom', '/x'));
+    expect(e.type, AppErrorType.unknown);
+    expect(e.isRetryable, isFalse);
+    expect(errors.userMessage(e), isNot(contains('FileSystemException')));
+  });
+
+  test('purge removes old synced images and orphan files only', () async {
+    final storage = env.services.storage;
+    final dir = await env.services.hardware.imagesDirectory();
+    final now = DateTime.now();
+    final old = toUnix(now.subtract(const Duration(days: 30)));
+    final ancient = toUnix(now.subtract(const Duration(days: 120)));
+
+    Future<String> file(String name) async {
+      final f = File('${dir.path}/$name');
+      await f.writeAsString('x');
+      return f.path;
+    }
+
+    LocalMealRecord rec(String id, String path, SyncStatus s, int t) =>
+        LocalMealRecord(
+          localId: id,
+          bedId: 'R101-B1',
+          patientId: 'P1',
+          mealId: 'M1',
+          mealTimeSlot: 'T1',
+          beforeAfter: MealPhase.before,
+          imagePath: path,
+          captureTime: t,
+          syncStatus: s,
+          createdAt: t,
+          updatedAt: t,
+        );
+
+    final syncedOld = await file('synced_old.jpg');
+    final syncedAncient = await file('synced_ancient.jpg');
+    final pendingOld = await file('pending_old.jpg');
+    final fresh = await file('fresh.jpg');
+    final orphan = await file('orphan.jpg.raw');
+    await storage.saveRecord(rec('a', syncedOld, SyncStatus.synced, old));
+    await storage.saveRecord(
+      rec('b', syncedAncient, SyncStatus.synced, ancient),
+    );
+    await storage.saveRecord(rec('c', pendingOld, SyncStatus.pending, old));
+    await storage.saveRecord(rec('d', fresh, SyncStatus.synced, toUnix(now)));
+
+    // 「現在」設在兩天後,孤兒檔就超過保留期了。
+    await env.services.records.purgeExpired(
+      now: now.add(const Duration(days: 2)),
+    );
+
+    expect(File(syncedOld).existsSync(), isFalse);
+    expect(await storage.getRecord('a'), isNotNull, reason: '紀錄保留 90 天');
+    expect(File(syncedAncient).existsSync(), isFalse);
+    expect(await storage.getRecord('b'), isNull);
+    expect(File(pendingOld).existsSync(), isTrue, reason: '未上傳的不能刪');
+    expect(File(fresh).existsSync(), isTrue);
+    expect(File(orphan).existsSync(), isFalse);
   });
 }

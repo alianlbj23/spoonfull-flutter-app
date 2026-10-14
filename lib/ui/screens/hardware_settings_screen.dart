@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -81,14 +82,20 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
     final state = context.read<HardwareState>();
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
-    await state.save(_edited);
+    try {
+      await state.save(_edited);
+    } on Object catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('儲存失敗:${state.errorMessage(e)}')),
+      );
+      return;
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
     if (!mounted) return;
-    setState(() {
-      _config = state.config;
-      _saving = false;
-    });
+    setState(() => _config = state.config);
     messenger.showSnackBar(const SnackBar(content: Text('硬體設定已儲存')));
-    if (pop) navigator.maybePop();
+    if (pop) unawaited(navigator.maybePop());
   }
 
   /// 測試前先套用目前畫面上的設定,才會用新的相機 / 秤。
@@ -109,6 +116,8 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
       context: context,
       builder: (_) => _TestCaptureDialog(result: result),
     );
+    // 測試照片看完就刪,不留在照片資料夾。
+    await state.discardTest();
   });
 
   Future<void> _captureReference() => _applyThen(() async {
@@ -127,7 +136,7 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
     final state = context.read<HardwareState>();
     if (state.liveWeightRunning) {
       await state.stopLiveWeight();
-      setState(() {});
+      if (mounted) setState(() {});
     } else {
       await state.startLiveWeight();
     }
@@ -283,7 +292,9 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
                                 height: 54,
                                 fontSize: 24,
                                 background: AppColors.periwinkle,
-                                onPressed: state.busy ? null : _captureReference,
+                                onPressed: state.busy
+                                    ? null
+                                    : _captureReference,
                               ),
                             ],
                           ),
@@ -295,7 +306,9 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
                                   borderRadius: BorderRadius.circular(8),
                                   child: Image.file(
                                     File(ref),
-                                    key: ValueKey('$ref-${File(ref).lastModifiedSync()}'),
+                                    key: ValueKey(
+                                      '$ref-${File(ref).lastModifiedSync()}',
+                                    ),
                                     width: 120,
                                     height: 68,
                                     fit: BoxFit.cover,
@@ -308,13 +321,18 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
                                       ? '尚無參考照:以畫面中央的邊緣密度判斷餐盒是否在畫面。\n'
                                             '建議在秤上不放任何東西時拍一張,判斷會更準。'
                                       : '已設定空秤參考照,拍照時會與它比對。',
-                                  style: AppText.size(18, color: Colors.black87),
+                                  style: AppText.size(
+                                    18,
+                                    color: Colors.black87,
+                                  ),
                                 ),
                               ),
                               if (ref != null)
                                 TextButton(
                                   key: const Key('clear-reference'),
-                                  onPressed: state.busy ? null : _clearReference,
+                                  onPressed: state.busy
+                                      ? null
+                                      : _clearReference,
                                   child: const Text('清除'),
                                 ),
                             ],
@@ -335,7 +353,10 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
                               Expanded(
                                 child: Text(
                                   '拍照品質檢查 (過暗 / 過亮 / 模糊 / 餐盒不在畫面時提示重拍)',
-                                  style: AppText.size(20, color: AppColors.navy),
+                                  style: AppText.size(
+                                    20,
+                                    color: AppColors.navy,
+                                  ),
                                 ),
                               ),
                             ],
@@ -440,16 +461,18 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
                             children: [
                               PrimaryButton(
                                 key: const Key('live-weight'),
-                                label: state.liveWeightRunning ? '停止讀取' : '即時讀數',
+                                label: state.liveWeightRunning
+                                    ? '停止讀取'
+                                    : '即時讀數',
                                 width: 170,
                                 height: 54,
                                 fontSize: 24,
-                                onPressed: sc.enabled ? _toggleLiveWeight : null,
+                                onPressed: sc.enabled
+                                    ? _toggleLiveWeight
+                                    : null,
                               ),
                               const SizedBox(width: 16),
-                              Expanded(
-                                child: _LiveWeight(state: state),
-                              ),
+                              Expanded(child: _LiveWeight(state: state)),
                             ],
                           ),
                         ],
@@ -622,7 +645,10 @@ class _TestCaptureDialog extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('尺寸 ${result.width}x${result.height}', style: style),
-                  Text('平均亮度 ${q.meanLuma.toStringAsFixed(0)} / 255', style: style),
+                  Text(
+                    '平均亮度 ${q.meanLuma.toStringAsFixed(0)} / 255',
+                    style: style,
+                  ),
                   Text('清晰度 ${q.blurScore.toStringAsFixed(1)}', style: style),
                   Text(
                     '餐盒 ${q.trayScore.toStringAsFixed(2)} (${q.trayScoreMethod == 'reference' ? '與參考照差異' : '邊緣密度'})',
@@ -630,7 +656,10 @@ class _TestCaptureDialog extends StatelessWidget {
                   ),
                   const SizedBox(height: 8),
                   for (final i in q.issues)
-                    Text('• ${i.message}', style: AppText.size(20, color: AppColors.orangeText)),
+                    Text(
+                      '• ${i.message}',
+                      style: AppText.size(20, color: AppColors.orangeText),
+                    ),
                 ],
               ),
             ),

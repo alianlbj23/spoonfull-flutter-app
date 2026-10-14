@@ -36,7 +36,10 @@ class AppConstants {
     Duration(seconds: 60),
   ];
 
-  // --- 重試策略 (規格 6.2):1s, 5s, 30s, 5min, 30min,最多 5 次 ---
+  /// 推播連線的心跳間隔,用來發現已經斷掉卻沒收到關閉通知的連線。
+  static const Duration realtimePingInterval = Duration(seconds: 20);
+
+  // --- 重試策略 (規格 6.2):1s, 5s, 30s, 5min,之後每 30min,直到成功 ---
   static const List<Duration> retryDelays = [
     Duration(seconds: 1),
     Duration(seconds: 5),
@@ -44,7 +47,19 @@ class AppConstants {
     Duration(minutes: 5),
     Duration(minutes: 30),
   ];
-  static int get maxRetryAttempts => retryDelays.length;
+
+  /// 舊版重試滿這個次數就放棄;啟動時用來找出被舊版放棄的項目並放回佇列。
+  static int get legacyMaxRetryAttempts => retryDelays.length;
+
+  // --- 本機保留期 ---
+  /// 已上傳的照片保留天數,過期後刪除檔案 (紀錄仍在)。
+  static const Duration syncedImageRetention = Duration(days: 14);
+
+  /// 已上傳的紀錄保留天數,過期後連同紀錄一起刪除。
+  static const Duration syncedRecordRetention = Duration(days: 90);
+
+  /// 照片資料夾裡沒有任何紀錄指向的檔案 (取消拍攝、測試拍照留下的) 多久後清掉。
+  static const Duration orphanImageRetention = Duration(days: 1);
 
   // --- 圖片驗證 (規格 8.4) ---
   static const int maxImageBytes = 5 * 1024 * 1024;
@@ -113,6 +128,9 @@ class AppConstants {
 
   /// 更新已下載但 App 正在使用時,多久後再看一次是否閒置。
   static const Duration updateIdleRetry = Duration(seconds: 15);
+
+  /// 新版啟動後正常跑滿這段時間才算更新成功,之後刪掉留著當退路的舊檔。
+  static const Duration updateHealthyAfter = Duration(seconds: 60);
 
   /// 重新啟動前顯示「正在更新」提示的時間。
   static const Duration updateInstallNotice = Duration(seconds: 3);

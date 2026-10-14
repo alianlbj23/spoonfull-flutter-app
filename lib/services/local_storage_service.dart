@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:sqflite/sqflite.dart';
 
 import '../data/local/app_database.dart';
@@ -27,6 +29,19 @@ class LocalStorageService {
   static const datasetRooms = 'rooms';
   static const datasetBeds = 'beds';
   static const datasetMeals = 'meals';
+  static const datasetRecords = 'records';
+
+  final _changes = StreamController<String>.broadcast();
+
+  /// 本機資料變動通知,內容是變動的資料集 ([datasetRooms] / [datasetBeds] /
+  /// [datasetMeals] / [datasetRecords]),讓畫面知道何時該重新讀取。
+  Stream<String> get changes => _changes.stream;
+
+  void _changed(String dataset) {
+    if (!_changes.isClosed) _changes.add(dataset);
+  }
+
+  Future<void> dispose() => _changes.close();
 
   // ---------------- 設備配置 ----------------
   DeviceConfig get deviceConfig => _prefs.readDeviceConfig();
@@ -69,6 +84,7 @@ class LocalStorageService {
       }
       await batch.commit(noResult: true);
     });
+    _changed(datasetRooms);
   }
 
   Future<List<RoomData>> getRooms(String placeId) async {
@@ -109,6 +125,7 @@ class LocalStorageService {
       }
       await batch.commit(noResult: true);
     });
+    _changed(datasetBeds);
   }
 
   Future<List<BedData>> getBeds(String placeId, {String? roomId}) async {
@@ -119,16 +136,6 @@ class LocalStorageService {
       orderBy: 'bed_name',
     );
     return rows.map(BedData.fromDb).toList();
-  }
-
-  Future<BedData?> getBed(String placeId, String bedId) async {
-    final rows = await _db.query(
-      'beds',
-      where: 'place_id = ? AND bed_id = ?',
-      whereArgs: [placeId, bedId],
-      limit: 1,
-    );
-    return rows.isEmpty ? null : BedData.fromDb(rows.first);
   }
 
   // ---------------- 膳食 / 時段 ----------------
@@ -153,6 +160,7 @@ class LocalStorageService {
       }
       await batch.commit(noResult: true);
     });
+    _changed(datasetMeals);
   }
 
   Future<List<MealData>> getMeals(String placeId) async {
@@ -176,11 +184,64 @@ class LocalStorageService {
   }
 
   // ---------------- 食物紀錄 ----------------
-  Future<void> saveRecord(LocalMealRecord r) => _db.insert(
-    'meal_records',
-    r.toDb(),
-    conflictAlgorithm: ConflictAlgorithm.replace,
-  );
+  Future<void> saveRecord(LocalMealRecord r) async {
+    await _db.insert(
+      'meal_records',
+      r.toDb(),
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+    _changed(datasetRecords);
+  }
+
+  /// 紀錄與它的佇列項目一起寫入:中途斷電也不會出現「紀錄在、佇列沒有」而永遠不上傳。
+  Future<void> saveRecordWithQueueItem(
+    LocalMealRecord r,
+    OfflineQueueItem item,
+  ) async {
+    await _db.transaction((txn) async {
+      await txn.insert(
+        'meal_records',
+        r.toDb(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      await txn.insert(
+        'offline_queue',
+        item.toDb(),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    });
+    _changed(datasetRecords);
+  }
+
+  Future<List<LocalMealRecord>> getRecordsByStatus(
+    SyncStatus status, {
+    int? updatedBefore,
+  }) async {
+    final rows = await _db.query(
+      'meal_records',
+      where: updatedBefore == null
+          ? 'sync_status = ?'
+          : 'sync_status = ? AND updated_at < ?',
+      whereArgs: [status.name, ?updatedBefore],
+      orderBy: 'created_at ASC',
+    );
+    return rows.map(LocalMealRecord.fromDb).toList();
+  }
+
+  Future<void> deleteRecord(String localId) async {
+    await _db.delete(
+      'meal_records',
+      where: 'local_id = ?',
+      whereArgs: [localId],
+    );
+    _changed(datasetRecords);
+  }
+
+  /// 所有紀錄指向的照片路徑 (清理孤兒照片時用來比對)。
+  Future<Set<String>> recordImagePaths() async {
+    final rows = await _db.query('meal_records', columns: ['image_path']);
+    return {for (final r in rows) r['image_path'] as String};
+  }
 
   Future<LocalMealRecord?> getRecord(String localId) async {
     final rows = await _db.query(
@@ -250,5 +311,8 @@ class LocalStorageService {
       }
     });
     await _prefs.clearSyncTimestamps();
+    for (final d in const [datasetRooms, datasetBeds, datasetMeals]) {
+      _changed(d);
+    }
   }
 }

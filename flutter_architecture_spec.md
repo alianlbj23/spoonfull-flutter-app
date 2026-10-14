@@ -1,3 +1,6 @@
+> **已過時**:這是最早對接 PHP 後端時的規格,API 路徑 (`/work/api/*.php`) 等內容已被取代。
+> 目前的 API 契約見 [README.md](README.md),系統設計見 [ARCHITECTURE.md](ARCHITECTURE.md)。本文件只留作參考。
+
 # Flutter送餐系统機台端架构设计规格书
 
 ## 1. 整体系统架构
