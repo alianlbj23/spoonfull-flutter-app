@@ -31,9 +31,26 @@
 |---|---|
 | WSL / PC | Dart 單元測試 (假 `ProcessRunner`)、bridge `--mock` |
 | Ubuntu x64 | `pip install pyrealsense2` 有 wheel,可快速驗證 |
-| Jetson Orin Nano | 最終驗證與部署;librealsense 需從原始碼建 (`FORCE_RSUSB_BACKEND=ON`、`BUILD_PYTHON_BINDINGS=ON`) |
+| Raspberry Pi 5 (目標機台) | 最終驗證與部署;librealsense 需從原始碼建 (`FORCE_RSUSB_BACKEND=ON`、`BUILD_PYTHON_BINDINGS=ON`) |
+| Jetson Orin Nano | 備用;App 與 bridge 程式碼相同,只有安裝步驟不同 |
 
-決定:直接在 Jetson 上開發與測試 (VS Code Remote-SSH),用 `git clone` 搬專案,開發時先停 `spoonfull-kiosk` service。
+### 決定 (2026-10-19)
+- **目標機台是 Raspberry Pi 5**,直接在 Pi 5 上開發與測試 (VS Code Remote-SSH),用 `git clone` 搬專案,開發時先停 `spoonfull-kiosk` service。Jetson 不再是主要環境。
+- **librealsense 在 Pi 5 上原生編譯**,不做交叉編譯、不在主機用 Docker arm64 容器編。理由:一次性 30–45 分鐘,保證對上 Pi OS Bookworm 的 glibc 2.36 / Python 3.11;Intel apt repo 只有 x86_64,PyPI / piwheels 沒有 aarch64 的 pyrealsense2 wheel。
+- 編完用 `cpack` 做成 `.deb` 留著,之後的機台直接 `dpkg -i`,並納入 `install-device.sh`。
+- Pi 5 要配 5A 電源 (D435f 最高吃 700 mA),接 USB 3 埠。
+
+### Pi 5 環境準備步驟
+```bash
+# Flutter 建置相依 (README §1)
+sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev
+# librealsense + pyrealsense2
+sudo apt install libssl-dev libusb-1.0-0-dev libudev-dev python3-dev
+git clone https://github.com/IntelRealSense/librealsense && cd librealsense && mkdir build && cd build
+cmake .. -DFORCE_RSUSB_BACKEND=ON -DBUILD_PYTHON_BINDINGS=ON -DBUILD_EXAMPLES=OFF -DPYTHON_EXECUTABLE=$(which python3)
+make -j4 && sudo make install && cpack   # 產出 .deb 留給下一台
+rs-enumerate-devices                     # 看得到 D435f 就 OK
+```
 
 ### 待決事項 (需要確認後才動工)
 1. **Server 契約**:`POST api/machine/records/` 目前只收 `image` 欄位 ([lib/data/api/api_repository.dart](lib/data/api/api_repository.dart))。建議新增 `depth` (image/png) 與 `depth_meta` (JSON);若 vision-worker 只認 depth CSV,格式要改。
@@ -46,7 +63,8 @@
 3. Dart `RealSenseCameraService` 與測試 (成功、timeout、輸出檔缺失、depth 尺寸不符)
 4. 硬體設定頁:來源只剩兩個選項,移除解析度 / MJPEG 選項
 5. 上傳新增深度欄位、離線佇列
-6. README、deploy/README、`install-device.sh` 加 librealsense 建置步驟
+6. README、deploy/README、`install-device.sh` 加 librealsense 建置步驟 (以 Pi OS Bookworm 為主,Jetson 標為次要)
 
 ## 其他筆記
+- 已加 `.gitattributes` 固定 `.cc` / `.h` / `.cmake` / `.swift` 為 LF;`flutter pub get` 重寫 generated plugin 檔案後不會再因 `core.autocrlf=true` 出現幻影修改。
 - `[ERROR:flutter/shell/platform/common/accessibility_bridge.cc(114)] Failed to update ui::AXTree` 為 Flutter 桌面引擎已知的無障礙層訊息,系統有 UIA 用戶端連上視窗時會出現,無害可忽略。
