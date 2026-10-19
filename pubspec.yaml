@@ -75,6 +75,8 @@ flutter:
 
   assets:
     - assets/images/
+    # App 圖示原圖 (tools/make_icons.py 產生);Linux 視窗圖示從 bundle 裡載入這張。
+    - assets/icon/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

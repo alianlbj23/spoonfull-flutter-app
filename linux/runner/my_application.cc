@@ -25,6 +25,21 @@ static gboolean kiosk_enabled() {
   return v != nullptr && std::strcmp(v, "0") != 0 && std::strcmp(v, "") != 0;
 }
 
+// Window / taskbar icon: assets/icon/app_icon.png bundled next to the binary
+// (<exe dir>/data/flutter_assets/assets/icon/app_icon.png). Missing file is
+// not fatal; the window just keeps the default icon.
+static void set_window_icon(GtkWindow* window) {
+  g_autofree gchar* exe = g_file_read_link("/proc/self/exe", nullptr);
+  if (exe == nullptr) return;
+  g_autofree gchar* dir = g_path_get_dirname(exe);
+  g_autofree gchar* icon = g_build_filename(
+      dir, "data", "flutter_assets", "assets", "icon", "app_icon.png", nullptr);
+  g_autoptr(GError) error = nullptr;
+  if (!gtk_window_set_icon_from_file(window, icon, &error)) {
+    g_warning("cannot load window icon %s: %s", icon, error->message);
+  }
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view));
@@ -82,6 +97,7 @@ static void my_application_activate(GApplication* application) {
   }
   // 機台觸控螢幕為 1024x600 橫向。
   gtk_window_set_default_size(window, 1024, 600);
+  set_window_icon(window);
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
