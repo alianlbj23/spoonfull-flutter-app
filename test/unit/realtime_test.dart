@@ -268,7 +268,7 @@ void main() {
         prefs: configuredPrefs,
         realtime: _service(connector),
       );
-      await env.services.pairing.pair(MockApiRepository.validPairingCode);
+      await pairWithMock(env);
     });
 
     tearDown(() => env.dispose());

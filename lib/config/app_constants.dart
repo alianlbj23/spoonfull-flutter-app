@@ -4,7 +4,12 @@ class AppConstants {
 
   // --- API endpoints (ARCHITECTURE.md §6.1) ---
   // 路徑結尾一律有斜線,避免 Django APPEND_SLASH 轉址丟掉 POST body。
-  static const String devicePairPath = 'api/machine/pair/';
+  /// 配對 (Device Authorization Flow,README §4.1):機台取碼 → 管理員在網頁核准 → 機台輪詢。
+  static const String pairStartPath = 'api/machine/pair/start/';
+  static const String pairPollPath = 'api/machine/pair/poll/';
+
+  /// 已配對機台的身分 (device_id / device_name / location),啟動時確認 token 仍有效。
+  static const String mePath = 'api/machine/me/';
   static const String roomDataPath = 'api/machine/rooms/';
   static const String bedDataPath = 'api/machine/beds/';
   static const String mealDataPath = 'api/machine/meals/';
@@ -26,8 +31,15 @@ class AppConstants {
   /// (capture_time 與 token 期限都靠機台時鐘)。
   static const Duration clockSkewTolerance = Duration(seconds: 120);
 
-  /// 配對被限流 (429 THROTTLED) 且沒有 Retry-After 時,停用配對按鈕的時間。
-  static const Duration pairingThrottleDefault = Duration(seconds: 60);
+  // --- 配對輪詢 (server 沒給時的預設值) ---
+  /// `pair/start/` 回應沒有 `interval` 時的輪詢間隔。
+  static const Duration pairingDefaultInterval = Duration(seconds: 5);
+
+  /// 收到 429 SLOW_DOWN 時,輪詢間隔加長這麼多。
+  static const Duration pairingSlowDownStep = Duration(seconds: 5);
+
+  /// `pair/start/` 回應沒有 `expires_in` 時,配對碼的有效時間。
+  static const Duration pairingDefaultExpiry = Duration(minutes: 10);
 
   // --- 快取有效期 (規格 7.3) ---
   static const Duration roomBedCacheTtl = Duration(hours: 1);
@@ -150,8 +162,6 @@ class AppConstants {
 
   /// 重新啟動前顯示「正在更新」提示的時間。
   static const Duration updateInstallNotice = Duration(seconds: 3);
-
-  static const int pairingCodeLength = 6;
 
   /// Figma 設計稿的畫布大小 (機台觸控螢幕 1024x600)。
   static const double designWidth = 1024;

@@ -44,7 +44,7 @@ class AppException implements Exception {
   final AppErrorType type;
   final String message;
 
-  /// 後端回傳的錯誤碼,例如 `INVALID_PAIRING_CODE`。
+  /// 後端回傳的錯誤碼,例如 `DENIED`、`TOKEN_EXPIRED`。
   final String? code;
   final int? statusCode;
 

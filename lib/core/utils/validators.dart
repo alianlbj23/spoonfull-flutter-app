@@ -15,13 +15,13 @@ class Validators {
   static AppException _invalid(String message, [String? code]) =>
       AppException(AppErrorType.localValidation, message, code: code);
 
-  static void pairingCode(String code) {
-    final re = RegExp('^\\d{${AppConstants.pairingCodeLength}}\$');
-    if (!re.hasMatch(code)) {
-      throw _invalid(
-        '配對碼需為 ${AppConstants.pairingCodeLength} 位數字',
-        'INVALID_PAIRING_CODE',
-      );
+  /// `pair/start/` 的 `hardware_id`:1–128 個 `A-Za-z0-9._:-` 字元
+  /// (App 產生的 UUID v4 一定符合;這裡擋的是被改壞的偏好設定)。
+  static final _hardwareId = RegExp(r'^[A-Za-z0-9._:-]{1,128}$');
+
+  static void hardwareId(String id) {
+    if (!_hardwareId.hasMatch(id)) {
+      throw _invalid('機台識別碼格式錯誤,請聯絡管理員', 'INVALID_HARDWARE_ID');
     }
   }
 
@@ -50,7 +50,10 @@ class Validators {
   static void weight(double? grams) {
     if (grams == null) return;
     if (!grams.isFinite || grams < 0 || grams > 20000) {
-      throw _invalid('重量 ${grams.toStringAsFixed(0)} g 不合理,請重新秤重', 'INVALID_WEIGHT');
+      throw _invalid(
+        '重量 ${grams.toStringAsFixed(0)} g 不合理,請重新秤重',
+        'INVALID_WEIGHT',
+      );
     }
   }
 

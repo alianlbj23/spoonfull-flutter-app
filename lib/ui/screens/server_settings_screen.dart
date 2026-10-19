@@ -106,24 +106,9 @@ class _ServerSettingsScreenState extends State<ServerSettingsScreen> {
     if (!mounted) return;
 
     if (!device.isPaired) {
-      // 有固定配對碼 (--dart-define=PAIRING_CODE) → 直接自動配對,不跳鍵盤。
-      if (AppConfig.hasAutoPairingCode) {
-        setState(() => _saving = true);
-        final ok = await device.autoPair();
-        if (!mounted) return;
-        setState(() => _saving = false);
-        if (ok) {
-          messenger.showSnackBar(const SnackBar(content: Text('已自動配對')));
-          if (!widget.embedded) navigator.maybePop();
-          return;
-        }
-        messenger.showSnackBar(
-          SnackBar(content: Text('自動配對失敗:${device.pairingError ?? ''}')),
-        );
-      }
-      // 嵌在主畫面時,解除配對會由 MainShell 帶回歡迎畫面。
+      // 嵌在主畫面時,解除配對會由 MainShell 帶回歡迎畫面,再由歡迎畫面開配對。
       if (widget.embedded) return;
-      // 尚未配對 → 進入配對碼輸入畫面
+      // 尚未配對 → 進入配對畫面 (顯示配對碼,等管理員核准)
       await navigator.push(
         MaterialPageRoute<void>(builder: (_) => const DevicePairingScreen()),
       );
@@ -344,7 +329,14 @@ class SystemStatusDialog extends StatelessWidget {
                   : '開發版 (不會自動更新)',
             ),
             row('設備 ID', device.config.deviceId),
-            row('設備名稱', device.config.deviceName),
+            row(
+              '設備名稱',
+              device.config.deviceName.isEmpty
+                  ? '(由管理員在網頁設定)'
+                  : device.config.deviceName,
+            ),
+            if (device.config.serverDeviceId case final id?)
+              row('伺服器編號', '$id'),
             row(
               '配對狀態',
               device.isPaired ? '已配對' : '未配對',

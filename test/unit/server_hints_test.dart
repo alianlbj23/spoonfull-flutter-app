@@ -4,36 +4,44 @@ import 'package:spoonfull_flutter_app/core/errors/app_exception.dart';
 import 'package:spoonfull_flutter_app/core/utils/time_utils.dart';
 import 'package:spoonfull_flutter_app/data/api/mock_api_repository.dart';
 import 'package:spoonfull_flutter_app/data/models/api_models.dart';
+import 'package:spoonfull_flutter_app/data/models/device_config.dart';
 import 'package:spoonfull_flutter_app/data/models/meal_data.dart';
 import 'package:spoonfull_flutter_app/state/device_state.dart';
 import 'package:spoonfull_flutter_app/state/record_state.dart';
 
 import '../helpers/test_services.dart';
 
-/// 模擬新版 server:meals 帶時段與指派提示,health 可設定時間差,配對可設定錯誤。
+/// 模擬新版 server:meals 帶時段與指派提示,health 可設定時間差,
+/// 配對的 start / poll 可排入錯誤與 pending 次數。
 class HintApi extends MockApiRepository {
-  HintApi() : super(latency: Duration.zero);
+  HintApi() : super(latency: Duration.zero, pendingPolls: 0);
 
   String? currentSlot = 'T3';
-  final List<AppException> pairErrors = [];
-  int pairCalls = 0;
+  final List<AppException> startErrors = [];
+  final List<AppException> pollErrors = [];
+  int startCalls = 0;
+  int pollCalls = 0;
+
+  /// 前幾次輪詢回 pending。
+  int pendingFirst = 0;
   Duration clockOffset = Duration.zero;
 
   @override
-  Future<PairingResult> pairDevice({
-    required String deviceId,
-    required String deviceName,
-    required String location,
-    required String pairingCode,
+  Future<PairingStart> startPairing({
+    required String hardwareId,
+    required String appVersion,
   }) {
-    pairCalls++;
-    if (pairErrors.isNotEmpty) throw pairErrors.removeAt(0);
-    return super.pairDevice(
-      deviceId: deviceId,
-      deviceName: deviceName,
-      location: location,
-      pairingCode: pairingCode,
-    );
+    startCalls++;
+    if (startErrors.isNotEmpty) throw startErrors.removeAt(0);
+    return super.startPairing(hardwareId: hardwareId, appVersion: appVersion);
+  }
+
+  @override
+  Future<PairingPoll> pollPairing(String deviceCode) async {
+    pollCalls++;
+    if (pollErrors.isNotEmpty) throw pollErrors.removeAt(0);
+    if (pollCalls <= pendingFirst) return const PairingPoll.pending();
+    return super.pollPairing(deviceCode);
   }
 
   @override
@@ -91,7 +99,7 @@ void main() {
     late RecordState state;
 
     setUp(() async {
-      await env.services.pairing.pair(MockApiRepository.validPairingCode);
+      await pairWithMock(env);
       await env.services.sync.refreshCache(force: true);
       state = RecordState(env.services);
       await state.loadAll();
@@ -165,74 +173,194 @@ void main() {
     });
   });
 
-  group('DeviceState pairing errors', () {
+  group('DeviceState pairing (device authorization flow)', () {
     late DeviceState device;
 
     setUp(() => device = DeviceState(env.services));
     tearDown(() => device.dispose());
 
-    test('server message is shown as-is', () async {
-      api.pairErrors.add(
-        const AppException(
-          AppErrorType.validation,
-          '此機台已被管理員停用,請聯絡管理員',
-          code: 'DEVICE_DISABLED',
-          statusCode: 422,
-          retryable: false,
-        ),
-      );
-      expect(await device.pair('123456'), isFalse);
-      expect(device.pairingError, '此機台已被管理員停用,請聯絡管理員');
+    AppException error(
+      String code,
+      int status, {
+      AppErrorType type = AppErrorType.client,
+      bool? retryable,
+      Duration? retryAfter,
+      String message = '',
+    }) => AppException(
+      type,
+      message,
+      code: code,
+      statusCode: status,
+      retryable: retryable,
+      retryAfter: retryAfter,
+    );
 
-      // Mock 的錯誤配對碼 (400 INVALID_PAIRING_CODE)。
-      expect(await device.pair('000000'), isFalse);
-      expect(device.pairingError, '配對碼無效或已過期');
-      expect(device.pairingError, isNot(contains('請求參數錯誤')));
+    test('pending → approved stores the token and pairs', () async {
+      final uuid = env.services.storage.deviceConfig.deviceId;
+      api.pendingFirst = 1;
+      await device.startPairing();
+      expect(device.status, PairingStatus.pairing);
+      expect(device.pairingCode, matches(RegExp(r'^[A-Z0-9]{4}-[A-Z0-9]{4}$')));
+      expect(device.pairingTimeLeft(), isNotNull);
+      expect(device.pairingRetryIn()!.inSeconds, inInclusiveRange(3, 5));
+      expect(api.startCalls, 1);
+
+      await device.pollPairingNow();
+      expect(device.status, PairingStatus.pairing, reason: 'pending → 繼續等');
+      expect(await env.tokens.read(), isNull);
+
+      await device.pollPairingNow();
+      expect(device.status, PairingStatus.paired);
+      expect(device.pairingCode, isNull, reason: '配對完成後丟掉配對碼');
+      expect(device.pairingRetryIn(), isNull);
+      expect((await env.tokens.read())!.deviceToken, 'mock-token-$uuid');
+      final config = env.services.storage.deviceConfig;
+      expect(config.paired, isTrue);
+      expect(config.deviceName, MockApiRepository.mockDeviceName);
+      expect(config.serverDeviceId, MockApiRepository.mockServerDeviceId);
+      expect(config.deviceId, uuid, reason: 'server 的 device_id 不覆蓋 UUID');
+      expect(await env.services.pairing.hasValidToken(), isTrue);
     });
 
-    test('THROTTLED blocks pairing for Retry-After seconds', () async {
-      api.pairErrors.add(
-        const AppException(
-          AppErrorType.client,
-          '嘗試太多次,請稍後再試',
-          code: 'THROTTLED',
-          statusCode: 429,
+    test('EXPIRED fetches a new code without user action', () async {
+      await device.startPairing();
+      api.pollErrors.add(error('EXPIRED', 400, retryable: false));
+      await device.pollPairingNow();
+      await pumpEventQueue();
+      expect(api.startCalls, 2);
+      expect(device.status, PairingStatus.pairing);
+      expect(device.pairingCode, isNotNull);
+      expect(device.pairingDenied, isFalse);
+      expect(device.pairingRetryIn(), isNotNull, reason: '新碼繼續輪詢');
+    });
+
+    test('DENIED shows the message and stops polling', () async {
+      await device.startPairing();
+      api.pollErrors.add(
+        error('DENIED', 403, type: AppErrorType.forbidden, retryable: false),
+      );
+      await device.pollPairingNow();
+      await pumpEventQueue();
+      expect(device.pairingDenied, isTrue);
+      expect(device.pairingError, '管理員拒絕了這次配對');
+      expect(device.status, PairingStatus.notPaired);
+      expect(device.pairingCode, isNull);
+      expect(device.pairingRetryIn(), isNull, reason: '不自動重試');
+      expect(api.startCalls, 1);
+      expect(api.pollCalls, 1);
+
+      // 使用者按「重新取得配對碼」才再開始。
+      await device.startPairing();
+      expect(api.startCalls, 2);
+      expect(device.pairingDenied, isFalse);
+      expect(device.status, PairingStatus.pairing);
+    });
+
+    test('SLOW_DOWN lengthens the polling interval', () async {
+      await device.startPairing();
+      expect(device.pollInterval, const Duration(seconds: 5));
+      api.pollErrors.add(error('SLOW_DOWN', 429, retryable: true));
+      await device.pollPairingNow();
+      expect(device.pollInterval, const Duration(seconds: 10));
+      expect(device.pairingRetryIn()!.inSeconds, inInclusiveRange(8, 10));
+      expect(device.status, PairingStatus.pairing);
+      expect(device.pairingCode, isNotNull, reason: '不換碼');
+    });
+
+    test('THROTTLED on start waits Retry-After before trying again', () async {
+      api.startErrors.add(
+        error(
+          'THROTTLED',
+          429,
           retryable: true,
-          retryAfter: Duration(seconds: 30),
+          retryAfter: const Duration(seconds: 30),
+          message: '嘗試太多次,請稍後再試',
         ),
       );
-      expect(await device.pair('123456'), isFalse);
+      await device.startPairing();
+      expect(api.startCalls, 1);
+      expect(device.status, PairingStatus.pairing);
+      expect(device.pairingCode, isNull);
       expect(device.pairingError, '嘗試太多次,請稍後再試');
-      final left = device.pairingCooldown()!;
-      expect(left.inSeconds, inInclusiveRange(28, 30));
-
-      // 倒數中按配對不會打到 server。
-      expect(await device.pair('123456'), isFalse);
-      expect(api.pairCalls, 1);
-
-      // 倒數結束後可以再配對。
+      expect(device.pairingRetryIn()!.inSeconds, inInclusiveRange(28, 30));
       expect(
-        device.pairingCooldown(DateTime.now().add(const Duration(seconds: 31))),
+        device.pairingRetryIn(DateTime.now().add(const Duration(seconds: 31))),
         isNull,
       );
-      device.pairingBlockedUntil = null;
-      expect(await device.pair('123456'), isTrue);
     });
 
-    test('THROTTLED without Retry-After waits the default', () async {
-      api.pairErrors.add(
-        const AppException(
-          AppErrorType.client,
-          'slow',
-          code: 'THROTTLED',
-          statusCode: 429,
+    test('THROTTLED without Retry-After waits one poll interval', () async {
+      api.startErrors.add(error('THROTTLED', 429, retryable: true));
+      await device.startPairing();
+      expect(device.pairingRetryIn()!.inSeconds, inInclusiveRange(3, 5));
+    });
+
+    test('network errors keep the code and retry with backoff', () async {
+      await device.startPairing();
+      final code = device.pairingCode;
+      api.pollErrors.add(const AppException(AppErrorType.network, '無法連線到伺服器'));
+      await device.pollPairingNow();
+      expect(device.status, PairingStatus.pairing);
+      expect(device.pairingCode, code);
+      expect(api.startCalls, 1);
+      expect(
+        device.pairingRetryIn()!.inMilliseconds,
+        inInclusiveRange(1, AppConstants.retryDelays.first.inMilliseconds),
+      );
+    });
+
+    test('unrecoverable errors stop with the server message', () async {
+      api.startErrors.add(
+        error(
+          'INVALID_HARDWARE_ID',
+          400,
+          retryable: false,
+          message: 'hardware_id 格式錯誤',
         ),
       );
-      await device.pair('123456');
+      await device.startPairing();
+      expect(device.status, PairingStatus.notPaired);
+      expect(device.pairingError, 'hardware_id 格式錯誤');
+      expect(device.pairingRetryIn(), isNull);
+    });
+
+    test('stopPairing drops the code; resumePairing restarts', () async {
+      await device.startPairing();
+      device.stopPairing();
+      expect(device.status, PairingStatus.notPaired);
+      expect(device.pairingCode, isNull);
+      expect(device.pairingRetryIn(), isNull);
+      await device.resumePairing();
+      expect(api.startCalls, 2, reason: '碼已丟掉,重新取');
+      expect(device.status, PairingStatus.pairing);
+    });
+
+    test('401 clears the token and returns to not paired', () async {
+      await device.startPairing();
+      await device.pollPairingNow();
+      expect(device.status, PairingStatus.paired);
+
+      env.services.errors.notifyUnauthorized();
+      await pumpEventQueue();
+      expect(device.status, PairingStatus.notPaired);
+      expect(await env.tokens.read(), isNull);
+      expect(device.forcedLogoutMessage, isNotNull);
+      expect(env.services.storage.deviceConfig.paired, isFalse);
       expect(
-        device.pairingCooldown()!.inSeconds,
-        closeTo(AppConstants.pairingThrottleDefault.inSeconds, 2),
+        env.services.storage.deviceConfig.serverDeviceId,
+        MockApiRepository.mockServerDeviceId,
+        reason: '解除配對不清掉 server 編號',
       );
+    });
+
+    test('startPairing without server settings fails locally', () async {
+      await env.services.storage.saveServerSettings(
+        const ServerSettings(host: '', placeId: ''),
+      );
+      await device.startPairing();
+      expect(device.status, PairingStatus.notPaired);
+      expect(device.pairingError, '請先完成伺服器設定');
+      expect(api.startCalls, 0);
     });
   });
 

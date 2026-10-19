@@ -58,7 +58,7 @@ void main() {
   setUp(() async {
     api = _RecordingApi();
     env = await createTestEnv(api: api, prefs: configuredPrefs);
-    await env.services.pairing.pair(MockApiRepository.validPairingCode);
+    await pairWithMock(env);
     await env.services.sync.start();
     await env.services.sync.refreshCache(force: true);
   });

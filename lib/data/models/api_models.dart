@@ -1,34 +1,113 @@
 import 'dart:convert';
 
 import '../../config/app_constants.dart';
+import '../../core/errors/app_exception.dart';
 import '../../core/utils/time_utils.dart';
 import 'ai_result.dart';
 import 'bed_data.dart';
 import 'meal_data.dart';
 import 'room_data.dart';
 
-/// api/machine/pair/ 成功回應。
-class PairingResult {
-  const PairingResult({
-    required this.deviceId,
-    required this.deviceToken,
-    this.tokenType = 'Bearer',
-    this.expiresIn,
-    this.message,
+/// `pair/start/` 成功回應:機台顯示 [pairingCode] 給管理員,之後拿 [deviceCode] 輪詢。
+///
+/// [deviceCode] 等同一次性的密碼:只放在記憶體,不寫 log、不顯示在畫面。
+class PairingStart {
+  const PairingStart({
+    required this.deviceCode,
+    required this.pairingCode,
+    required this.expiresIn,
+    required this.interval,
   });
 
-  final String deviceId;
-  final String deviceToken;
-  final String tokenType;
-  final int? expiresIn;
-  final String? message;
+  final String deviceCode;
+  final String pairingCode;
 
-  factory PairingResult.fromJson(Map<String, Object?> json) => PairingResult(
-    deviceId: asString(json['device_id']) ?? '',
-    deviceToken: asString(json['device_token']) ?? '',
-    tokenType: asString(json['token_type']) ?? 'Bearer',
-    expiresIn: asInt(json['expires_in']),
-    message: asString(json['message']),
+  /// 配對碼有效秒數。
+  final int expiresIn;
+
+  /// 輪詢間隔 (秒)。
+  final int interval;
+
+  factory PairingStart.fromJson(Map<String, Object?> json) {
+    final deviceCode = asString(json['device_code']) ?? '';
+    final pairingCode = asString(json['pairing_code']) ?? '';
+    if (deviceCode.isEmpty || pairingCode.isEmpty) {
+      throw const AppException(AppErrorType.parse, '伺服器未回傳配對碼');
+    }
+    final expiresIn = asInt(json['expires_in']);
+    final interval = asInt(json['interval']);
+    return PairingStart(
+      deviceCode: deviceCode,
+      pairingCode: pairingCode,
+      expiresIn: expiresIn == null || expiresIn <= 0
+          ? AppConstants.pairingDefaultExpiry.inSeconds
+          : expiresIn,
+      interval: interval == null || interval <= 0
+          ? AppConstants.pairingDefaultInterval.inSeconds
+          : interval,
+    );
+  }
+}
+
+/// `pair/poll/` 回應:管理員還沒核准 ([approved] 為 false),或已核准並附上 token。
+///
+/// token 只會回這一次;存進安全儲存前不要丟掉這個物件。
+class PairingPoll {
+  const PairingPoll.pending()
+    : approved = false,
+      deviceToken = '',
+      serverDeviceId = null,
+      deviceName = '';
+
+  const PairingPoll.approved({
+    required this.deviceToken,
+    required this.serverDeviceId,
+    required this.deviceName,
+  }) : approved = true;
+
+  final bool approved;
+  final String deviceToken;
+
+  /// server 端的整數 id;與 App 自己的 UUID (`DeviceConfig.deviceId`) 不同。
+  final int? serverDeviceId;
+
+  /// 管理員在網頁設定的機台名稱。
+  final String deviceName;
+
+  factory PairingPoll.fromJson(Map<String, Object?> json) {
+    final status = asString(json['status']) ?? '';
+    if (status == 'pending') return const PairingPoll.pending();
+    if (status != 'approved') {
+      throw AppException(AppErrorType.parse, '伺服器回傳未知的配對狀態 ($status)');
+    }
+    final token = asString(json['device_token']) ?? '';
+    if (token.isEmpty) {
+      throw const AppException(AppErrorType.parse, '伺服器未回傳 token');
+    }
+    return PairingPoll.approved(
+      deviceToken: token,
+      serverDeviceId: asInt(json['device_id']),
+      deviceName: asString(json['device_name']) ?? '',
+    );
+  }
+}
+
+/// `GET api/machine/me/`:已配對機台在 server 上的身分。
+class DeviceIdentity {
+  const DeviceIdentity({
+    required this.serverDeviceId,
+    required this.deviceName,
+    required this.location,
+  });
+
+  final int? serverDeviceId;
+  final String deviceName;
+  final String location;
+
+  factory DeviceIdentity.fromJson(Map<String, Object?> json) => DeviceIdentity(
+    serverDeviceId: asInt(json['device_id']),
+    deviceName: asString(json['device_name']) ?? '',
+    location: asString(json['location']) ?? '',
   );
 }
 

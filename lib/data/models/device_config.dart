@@ -9,9 +9,13 @@ class DeviceConfig {
     this.paired = false,
     this.pairingTime,
     this.lastSync,
+    this.serverDeviceId,
   });
 
+  /// App 第一次啟動產生的 UUID,配對時當 `hardware_id`;永遠不會被 server 的值覆蓋。
   final String deviceId;
+
+  /// 管理員在網頁設定的機台名稱 (配對核准與 `api/machine/me/` 帶回)。
   final String deviceName;
 
   /// 設定畫面中的「場域」,同時作為 API 的 place_id。
@@ -20,12 +24,16 @@ class DeviceConfig {
   final int? pairingTime;
   final int? lastSync;
 
+  /// server 端 `Device` 表的整數 id;未配對過為 null。
+  final int? serverDeviceId;
+
   DeviceConfig copyWith({
     String? deviceName,
     String? location,
     bool? paired,
     int? pairingTime,
     int? lastSync,
+    int? serverDeviceId,
   }) {
     return DeviceConfig(
       deviceId: deviceId,
@@ -34,6 +42,7 @@ class DeviceConfig {
       paired: paired ?? this.paired,
       pairingTime: pairingTime ?? this.pairingTime,
       lastSync: lastSync ?? this.lastSync,
+      serverDeviceId: serverDeviceId ?? this.serverDeviceId,
     );
   }
 }

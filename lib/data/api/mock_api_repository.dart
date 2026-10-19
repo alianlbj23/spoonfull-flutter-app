@@ -11,44 +11,100 @@ import 'api_repository.dart';
 
 /// 無後端時的示範資料 (`--dart-define=USE_MOCK_API=true`)。
 ///
-/// 配對碼固定為 `123456`。
+/// 配對不需要管理員:輪詢 [pendingPolls] 次後自動核准。
 class MockApiRepository implements ApiRepository {
-  MockApiRepository({this.latency = const Duration(milliseconds: 400)});
+  MockApiRepository({
+    this.latency = const Duration(milliseconds: 400),
+    this.pendingPolls = 1,
+  });
 
-  static const String validPairingCode = '123456';
+  static const String mockDeviceName = '示範機台';
+  static const int mockServerDeviceId = 12;
 
   final Duration latency;
+
+  /// 核准前回幾次 `pending`。
+  final int pendingPolls;
+
   final _random = Random();
 
+  /// 目前有效的 device_code → 已輪詢次數;換新碼時舊碼失效。
+  final Map<String, int> _polls = {};
+  String? _hardwareId;
+
   static const _roomNames = [
-    '101', '102', '103', '104', '105', '106',
-    '107', '108', '109', '110', '111', '門診',
+    '101',
+    '102',
+    '103',
+    '104',
+    '105',
+    '106',
+    '107',
+    '108',
+    '109',
+    '110',
+    '111',
+    '門診',
   ];
   static const _patients = ['王小明', '陳美玲', '林志強', '張淑芬', '李大同', '黃怡君'];
 
   Future<void> _delay() => Future<void>.delayed(latency);
 
   @override
-  Future<PairingResult> pairDevice({
-    required String deviceId,
-    required String deviceName,
-    required String location,
-    required String pairingCode,
+  Future<PairingStart> startPairing({
+    required String hardwareId,
+    required String appVersion,
   }) async {
     await _delay();
-    if (pairingCode != validPairingCode) {
+    _hardwareId = hardwareId;
+    _polls.clear();
+    final deviceCode = List.generate(
+      64,
+      (_) => '0123456789abcdef'[_random.nextInt(16)],
+    ).join();
+    _polls[deviceCode] = 0;
+    String part() => List.generate(
+      4,
+      (_) => 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[_random.nextInt(31)],
+    ).join();
+    return PairingStart(
+      deviceCode: deviceCode,
+      pairingCode: '${part()}-${part()}',
+      expiresIn: 600,
+      interval: 5,
+    );
+  }
+
+  @override
+  Future<PairingPoll> pollPairing(String deviceCode) async {
+    await _delay();
+    final n = _polls[deviceCode];
+    if (n == null) {
       throw const AppException(
         AppErrorType.client,
-        '配對碼無效或已過期',
-        code: 'INVALID_PAIRING_CODE',
+        '配對碼已過期,請重新取得',
+        code: 'EXPIRED',
         statusCode: 400,
+        retryable: false,
       );
     }
-    return PairingResult(
-      deviceId: deviceId,
-      deviceToken: 'mock-token-$deviceId',
-      expiresIn: 86400,
-      message: 'Device paired successfully',
+    _polls[deviceCode] = n + 1;
+    if (n < pendingPolls) return const PairingPoll.pending();
+    _polls.remove(deviceCode);
+    return PairingPoll.approved(
+      deviceToken: 'mock-token-$_hardwareId',
+      serverDeviceId: mockServerDeviceId,
+      deviceName: mockDeviceName,
+    );
+  }
+
+  @override
+  Future<DeviceIdentity> fetchMe() async {
+    await _delay();
+    return const DeviceIdentity(
+      serverDeviceId: mockServerDeviceId,
+      deviceName: mockDeviceName,
+      location: 'demo',
     );
   }
 
@@ -108,15 +164,57 @@ class MockApiRepository implements ApiRepository {
     final place = placeId ?? 'demo';
     return MealsResponse(
       [
-        MealData(placeId: place, mealId: 'M1', mealName: '一般早餐', mealType: MealType.breakfast, lastUpdated: now),
-        MealData(placeId: place, mealId: 'M2', mealName: '一般午餐', mealType: MealType.lunch, lastUpdated: now),
-        MealData(placeId: place, mealId: 'M3', mealName: '一般晚餐', mealType: MealType.dinner, lastUpdated: now),
-        MealData(placeId: place, mealId: 'M4', mealName: '低鈉餐', mealType: MealType.lunch, lastUpdated: now),
+        MealData(
+          placeId: place,
+          mealId: 'M1',
+          mealName: '一般早餐',
+          mealType: MealType.breakfast,
+          lastUpdated: now,
+        ),
+        MealData(
+          placeId: place,
+          mealId: 'M2',
+          mealName: '一般午餐',
+          mealType: MealType.lunch,
+          lastUpdated: now,
+        ),
+        MealData(
+          placeId: place,
+          mealId: 'M3',
+          mealName: '一般晚餐',
+          mealType: MealType.dinner,
+          lastUpdated: now,
+        ),
+        MealData(
+          placeId: place,
+          mealId: 'M4',
+          mealName: '低鈉餐',
+          mealType: MealType.lunch,
+          lastUpdated: now,
+        ),
       ],
       const [
-        TimeSlot(timeSlotId: 'T1', timeSlotName: '07:00 - 08:30', startTime: '07:00', endTime: '08:30', sortOrder: 0),
-        TimeSlot(timeSlotId: 'T2', timeSlotName: '11:30 - 13:00', startTime: '11:30', endTime: '13:00', sortOrder: 1),
-        TimeSlot(timeSlotId: 'T3', timeSlotName: '17:00 - 18:30', startTime: '17:00', endTime: '18:30', sortOrder: 2),
+        TimeSlot(
+          timeSlotId: 'T1',
+          timeSlotName: '07:00 - 08:30',
+          startTime: '07:00',
+          endTime: '08:30',
+          sortOrder: 0,
+        ),
+        TimeSlot(
+          timeSlotId: 'T2',
+          timeSlotName: '11:30 - 13:00',
+          startTime: '11:30',
+          endTime: '13:00',
+          sortOrder: 1,
+        ),
+        TimeSlot(
+          timeSlotId: 'T3',
+          timeSlotName: '17:00 - 18:30',
+          startTime: '17:00',
+          endTime: '18:30',
+          sortOrder: 2,
+        ),
       ],
       now,
     );

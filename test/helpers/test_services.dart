@@ -62,7 +62,7 @@ Future<TestEnv> createTestEnv({
     database: db,
     prefs: await PreferencesStorage.create(),
     tokens: tokens,
-    api: api ?? MockApiRepository(latency: Duration.zero),
+    api: api ?? MockApiRepository(latency: Duration.zero, pendingPolls: 0),
     connectivity: connectivity,
     realtime: realtime,
     hardwareBuilder: (storage) => HardwareService(
@@ -88,6 +88,17 @@ Future<TestEnv> createTestEnv({
     ),
   );
   return TestEnv(services, connectivity, tokens, tempDir);
+}
+
+/// 用 Mock API 走完整個配對流程 (取碼 → 輪詢到核准 → 存 token)。
+Future<void> pairWithMock(TestEnv env) async {
+  final pairing = env.services.pairing;
+  final start = await pairing.startPairing();
+  var poll = await pairing.pollPairing(start.deviceCode);
+  while (!poll.approved) {
+    poll = await pairing.pollPairing(start.deviceCode);
+  }
+  await pairing.completePairing(poll);
 }
 
 /// 已完成伺服器設定的偏好值。

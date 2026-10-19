@@ -72,7 +72,7 @@
 |---|---|---|
 | 選病房 → 床位 → 菜色 → 餐前／餐後 → 拍照 → 上傳 | 已有 | |
 | 離線佇列、重試（1s → 5s → 30s → 5m，之後每 30m 直到成功） | 已有 | 以錯誤信封的 `retryable` 為準；舊版 server 沒給時只有 4xx 錯誤信封（408 / 429 除外）不重試，代理回的 HTML 一律重試；遵守 `Retry-After`，見 §6.3 與 README §3.3 |
-| 配對、token 儲存 | 已有 | Linux kiosk 沒有 keyring 時自動改用檔案儲存（權限 600） |
+| 配對、token 儲存 | 已有 | Device Authorization Flow：機台顯示配對碼，管理員在網頁核准，機台輪詢拿 token（README §4.1）。Linux kiosk 沒有 keyring 時自動改用檔案儲存（權限 600） |
 | 相機擷取 | 已有 | `image_picker` 在 Linux 不支援相機，改用 GStreamer / V4L2、`rpicam-still` |
 | 秤重 | 已有 | 自動讀取秤的數值（USB HID 秤、序列埠秤或 HX711 load cell），餐前餐後各一次，隨照片上傳 |
 | 拍照品質檢查 | 已有 | 純 CPU：過暗、過亮、模糊（Laplacian 變異數）、餐盒不在畫面 → 提示重拍 |
@@ -102,7 +102,9 @@
 
 | 端點 | 對應 server 資料 |
 |---|---|
-| `POST api/machine/pair/` | 新增 `Device` 表。配對碼由 Super Admin 在網頁產生：6 位數、10 分鐘內有效、一次性。成功後發給該機台專屬 token（存雜湊值）。可重複配對（換新 token）。 |
+| `POST api/machine/pair/start/` | 機台送 `hardware_id`（App 的 UUID）與 `app_version`，server 發 `device_code`（機台輪詢用）與 `pairing_code`（顯示給管理員，10 分鐘內有效、一次性）。同一 `hardware_id` 再配對視為同一台機台，舊 token 失效 |
+| `POST api/machine/pair/poll/` | 機台每 `interval` 秒問一次；管理員在網頁「機台管理」輸入配對碼核准後回 `approved` + 專屬 token（存雜湊值）、整數 `device_id`、`device_name`。`EXPIRED` / `DENIED` / `SLOW_DOWN` 的機台行為見 README §4.1 |
+| `GET api/machine/me/` | 已配對機台的 `device_id` / `device_name` / `location`；機台啟動時用來確認 token 仍有效 |
 | `GET api/machine/rooms/` | `LTCPatient.room_number` 去重 |
 | `GET api/machine/beds/` | `LTCPatient`：`bed_id = "{room}-{bed}"`，`patient_id = LTCPatient.id`。選填 `?room_id=` 只回該房 |
 | `GET api/machine/meals/` | **當天**的菜色：循環模式依 `day_cycle`，開放模式依 `serve_date`。時段來自 `SystemSettings.lunch_*/dinner_*` |
@@ -114,9 +116,9 @@
 
 ### 6.2 認證
 
-- 除配對外，所有請求帶 `Authorization: Bearer <device_token>`。
+- 除配對的 `pair/start/`、`pair/poll/` 與健康檢查外，所有請求帶 `Authorization: Bearer <device_token>`。
 - 每台機台獨立 token，可在網頁上個別停用。**取代現在所有機台共用的 `DEVICE_API_KEY`**；舊 Nano 機台（`X-Device-Key`）在過渡期並行支援，新機台全部上線後移除。
-- token 無效回 **401**，機台會清除 token 並要求重新配對。
+- token 無效（管理員撤銷或重新配對）回 **401**，機台會清除 token 並回到配對畫面重新取碼；WebSocket 以 close code 4401 表示同一件事。
 
 ### 6.3 狀態碼規則（決定機台會不會重送）
 
@@ -125,7 +127,7 @@
 | 成功 | 200 | 標記已同步 |
 | 資料有錯（床位不存在、圖片格式錯） | **422** | 顯示錯誤，**不重試** |
 | `bed_id` 與 `patient_id` 不一致但 `patient_id` 是有效住民 | 200 | 以 `patient_id` 為準收下，回應帶 `bed_mismatch: true` |
-| token 失效 | 401 | 重新配對 |
+| token 失效 | 401 | 回到配對畫面重新取碼 |
 | 限流 | 429（`Retry-After`） | 依 `Retry-After` 稍後重試 |
 | 暫時性問題（資料庫忙、磁碟滿） | **5xx** | 進佇列重試 |
 
@@ -158,8 +160,8 @@
 
 | 表 | 變更 |
 |---|---|
-| `Device`（新） | `device_id`(UUID, unique)、`name`、`location`、`token_hash`、`paired_at`、`last_seen_at`、`is_active` |
-| `PairingCode`（新） | `code`、`created_by`、`expires_at`、`used_by_device` |
+| `Device`（新） | 整數 id（回給機台當 `device_id`）、`hardware_id`(App 的 UUID, unique)、`name`（管理員設定）、`location`、`token_hash`、`paired_at`、`last_seen_at`、`is_active` |
+| `DeviceAuthorization`（新） | `device_code`(64 hex)、`pairing_code`、`hardware_id`、`app_version`、`status`(pending / approved / denied / expired)、`expires_at`、`approved_by` |
 | `FoodIntake` | 新增 `captured_at`、`client_record_id`(unique, nullable)、`device`(FK Device, nullable)、`assignment_mismatch`、`vision_status`(pending/running/done/failed)、`edge_result`(JSON)。`weight_g` 既有。 |
 | `DishIntake`（新） | 每筆 `FoodIntake` 每道菜一列：`food_intake`、`dish_name`（來自菜單）、`compartment_index`、`mask`(RLE 或 polygon)、`area_px`、`matched_by`(yolo_class / vlm / manual)。餐後紀錄另有 `before_area_px`、`remaining_ratio`、`eaten_g` |
 | `LeftoverAnalysis` | 保留為餐後的總結（總剩餘比例、重量比對、狀態）。`vlm_*` 欄位改為選填。 |

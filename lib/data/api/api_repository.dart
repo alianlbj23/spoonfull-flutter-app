@@ -14,12 +14,17 @@ import 'api_client.dart';
 
 /// 後端 API 介面 (規格 4)。
 abstract class ApiRepository {
-  Future<PairingResult> pairDevice({
-    required String deviceId,
-    required String deviceName,
-    required String location,
-    required String pairingCode,
+  /// 配對第一步:取得配對碼 (不帶 token)。
+  Future<PairingStart> startPairing({
+    required String hardwareId,
+    required String appVersion,
   });
+
+  /// 配對第二步:每 `interval` 秒問一次管理員核准了沒 (不帶 token)。
+  Future<PairingPoll> pollPairing(String deviceCode);
+
+  /// 已配對機台的身分;token 失效時與其他 API 一樣回 401。
+  Future<DeviceIdentity> fetchMe();
 
   Future<RoomsResponse> fetchRooms({String? placeId, int? lastUpdated});
 
@@ -46,24 +51,28 @@ class HttpApiRepository implements ApiRepository {
   final ApiClient _client;
 
   @override
-  Future<PairingResult> pairDevice({
-    required String deviceId,
-    required String deviceName,
-    required String location,
-    required String pairingCode,
+  Future<PairingStart> startPairing({
+    required String hardwareId,
+    required String appVersion,
   }) async {
-    final data = await _client.postJson(
-      AppConstants.devicePairPath,
-      {
-        'device_id': deviceId,
-        'device_name': deviceName,
-        'location': location,
-        'pairing_code': pairingCode,
-      },
-      authenticated: false,
-    );
-    return PairingResult.fromJson(data);
+    final data = await _client.postJson(AppConstants.pairStartPath, {
+      'hardware_id': hardwareId,
+      'app_version': appVersion,
+    }, authenticated: false);
+    return PairingStart.fromJson(data);
   }
+
+  @override
+  Future<PairingPoll> pollPairing(String deviceCode) async {
+    final data = await _client.postJson(AppConstants.pairPollPath, {
+      'device_code': deviceCode,
+    }, authenticated: false);
+    return PairingPoll.fromJson(data);
+  }
+
+  @override
+  Future<DeviceIdentity> fetchMe() async =>
+      DeviceIdentity.fromJson(await _client.get(AppConstants.mePath));
 
   @override
   Future<RoomsResponse> fetchRooms({String? placeId, int? lastUpdated}) async {
@@ -135,9 +144,7 @@ class HttpApiRepository implements ApiRepository {
       mimeType: ext == '.png' ? 'image/png' : 'image/jpeg',
     );
     final result = MealRecordResult.fromJson(data);
-    if (result.duplicate ||
-        result.assignmentMismatch ||
-        result.bedMismatch) {
+    if (result.duplicate || result.assignmentMismatch || result.bedMismatch) {
       Log.i(
         'record ${upload.clientRecordId} → ${result.recordId}: '
         'duplicate=${result.duplicate} '

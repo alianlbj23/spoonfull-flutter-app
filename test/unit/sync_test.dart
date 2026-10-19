@@ -58,7 +58,7 @@ void main() {
   setUp(() async {
     api = FlakyApi();
     env = await createTestEnv(api: api, prefs: configuredPrefs);
-    await env.services.pairing.pair(MockApiRepository.validPairingCode);
+    await pairWithMock(env);
     await env.services.sync.start();
     await env.services.sync.refreshCache(force: true);
     tmp = await Directory.systemTemp.createTemp('spoonfull_test');
@@ -558,7 +558,7 @@ void main() {
       waiting.copyWith(nextAttemptAt: nowUnix() + 1800),
     );
 
-    await env.services.pairing.pair(MockApiRepository.validPairingCode);
+    await pairWithMock(env);
     await env.services.sync.afterPaired();
 
     expect(await env.services.queue.pendingItems(), isEmpty);

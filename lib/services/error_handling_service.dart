@@ -36,10 +36,22 @@ class ErrorHandlingService {
     };
   }
 
-  /// 配對失敗的提示:server 回的 `error.message` (THROTTLED、INVALID_PAIRING_CODE、
-  /// DEVICE_DISABLED 等) 原樣顯示,不加「請求參數錯誤:」之類的前綴。
+  /// 配對 (pair/start、pair/poll) 失敗的提示。
+  ///
+  /// `DENIED` 固定顯示「管理員拒絕了這次配對」;其他配對錯誤碼 (EXPIRED、SLOW_DOWN、
+  /// THROTTLED、INVALID_HARDWARE_ID) 與 server 自己回的錯誤信封原樣顯示
+  /// `error.message`,不加「請求參數錯誤:」之類的前綴;沒有訊息才用這裡的預設。
   String pairingMessage(Object error) {
     final e = normalize(error);
+    final fallback = switch (e.code) {
+      'DENIED' => '管理員拒絕了這次配對',
+      'EXPIRED' => '配對碼已過期,正在重新取得',
+      'SLOW_DOWN' => '查詢太頻繁,已放慢輪詢速度',
+      'THROTTLED' => '嘗試太多次,請稍後再試',
+      'INVALID_HARDWARE_ID' => '機台識別碼格式錯誤,請聯絡管理員',
+      _ => null,
+    };
+    if (e.code == 'DENIED') return fallback!;
     final fromServer =
         e.code != null &&
         e.message.isNotEmpty &&
@@ -48,6 +60,7 @@ class ErrorHandlingService {
             e.type == AppErrorType.forbidden ||
             e.type == AppErrorType.unauthorized);
     if (fromServer) return e.message;
+    if (fallback != null) return fallback;
     if (e.type == AppErrorType.client && e.statusCode == 429) {
       return '嘗試太多次,請稍後再試';
     }

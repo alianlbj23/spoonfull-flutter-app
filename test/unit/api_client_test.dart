@@ -63,28 +63,111 @@ void main() {
     expect(res.timestamp, 200);
   });
 
-  test('pairing request is sent without Authorization header', () async {
-    late http.Request captured;
-    final repo = HttpApiRepository(
-      _client((req) async {
-        captured = req;
-        return _json({
-          'success': true,
-          'data': {'device_id': 'd', 'device_token': 't', 'expires_in': 10},
-        }, 200);
-      }),
-    );
-    final r = await repo.pairDevice(
-      deviceId: 'd',
-      deviceName: 'n',
-      location: 'l',
-      pairingCode: '123456',
-    );
-    expect(captured.headers.containsKey('Authorization'), isFalse);
-    expect(captured.headers.containsKey(ApiClient.skipAuthHeader), isFalse);
-    expect(jsonDecode(captured.body)['pairing_code'], '123456');
-    expect(r.deviceToken, 't');
-    expect(r.expiresIn, 10);
+  group('device authorization flow', () {
+    test('pair/start is sent without Authorization header', () async {
+      late http.Request captured;
+      final repo = HttpApiRepository(
+        _client((req) async {
+          captured = req;
+          return _json({
+            'success': true,
+            'data': {
+              'device_code': 'c' * 64,
+              'pairing_code': 'K7QM-42XP',
+              'expires_in': 600,
+              'interval': 5,
+            },
+          }, 200);
+        }),
+      );
+      final r = await repo.startPairing(hardwareId: 'hw-1', appVersion: 'dev');
+      expect(captured.url.path, '/api/machine/pair/start/');
+      expect(captured.headers.containsKey('Authorization'), isFalse);
+      expect(captured.headers.containsKey(ApiClient.skipAuthHeader), isFalse);
+      expect(jsonDecode(captured.body), {
+        'hardware_id': 'hw-1',
+        'app_version': 'dev',
+      });
+      expect(r.deviceCode, 'c' * 64);
+      expect(r.pairingCode, 'K7QM-42XP');
+      expect(r.expiresIn, 600);
+      expect(r.interval, 5);
+    });
+
+    test('pair/start fills in defaults and rejects a missing code', () {
+      final r = PairingStart.fromJson({
+        'device_code': 'x',
+        'pairing_code': 'y',
+      });
+      expect(r.expiresIn, 600);
+      expect(r.interval, 5);
+      expect(
+        () => PairingStart.fromJson({'pairing_code': 'y'}),
+        throwsA(isA<AppException>()),
+      );
+    });
+
+    test('pair/poll parses pending and approved', () async {
+      final responses = [
+        {'status': 'pending'},
+        {
+          'status': 'approved',
+          'device_token': 'spf_secret',
+          'device_id': 12,
+          'device_name': 'A棟2樓',
+        },
+      ];
+      late http.Request captured;
+      final repo = HttpApiRepository(
+        _client((req) async {
+          captured = req;
+          return _json({'success': true, 'data': responses.removeAt(0)}, 200);
+        }),
+      );
+      final pending = await repo.pollPairing('c' * 64);
+      expect(captured.url.path, '/api/machine/pair/poll/');
+      expect(captured.headers.containsKey('Authorization'), isFalse);
+      expect(jsonDecode(captured.body), {'device_code': 'c' * 64});
+      expect(pending.approved, isFalse);
+
+      final approved = await repo.pollPairing('c' * 64);
+      expect(approved.approved, isTrue);
+      expect(approved.deviceToken, 'spf_secret');
+      expect(approved.serverDeviceId, 12);
+      expect(approved.deviceName, 'A棟2樓');
+    });
+
+    test('approved without a token is a parse error', () {
+      expect(
+        () => PairingPoll.fromJson({'status': 'approved', 'device_id': 1}),
+        throwsA(
+          isA<AppException>().having((e) => e.type, 'type', AppErrorType.parse),
+        ),
+      );
+      expect(
+        () => PairingPoll.fromJson({'status': 'weird'}),
+        throwsA(isA<AppException>()),
+      );
+    });
+
+    test('me is sent with the bearer token', () async {
+      late http.Request captured;
+      final repo = HttpApiRepository(
+        _client((req) async {
+          captured = req;
+          return _json({
+            'success': true,
+            'data': {'device_id': 12, 'device_name': 'A棟2樓', 'location': 'A'},
+          }, 200);
+        }),
+      );
+      final me = await repo.fetchMe();
+      expect(captured.url.path, '/api/machine/me/');
+      expect(captured.headers['Authorization'], 'Bearer tok-123');
+      expect(me.serverDeviceId, 12);
+      expect(me.deviceName, 'A棟2樓');
+      expect(me.location, 'A');
+    });
   });
 
   group('error mapping (spec 6.1)', () {

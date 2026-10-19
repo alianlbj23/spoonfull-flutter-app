@@ -3,16 +3,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-import '../../config/app_config.dart';
-import '../../config/app_constants.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/theme/app_theme.dart';
 import '../../state/device_state.dart';
 import '../widgets/buttons.dart';
-import '../widgets/numeric_keypad.dart';
-import '../widgets/pill_field.dart';
 
-/// 配對畫面 (Figma「請輸入密碼」):輸入管理端提供的配對碼,呼叫 device_pair。
+/// 配對畫面:顯示配對碼給管理員,等管理員在網頁核准 (Device Authorization Flow)。
+///
+/// 進入畫面就取碼並開始輪詢;離開畫面或 App 進背景時停止,回來時繼續
+/// (碼過期就重新取)。
 class DevicePairingScreen extends StatefulWidget {
   const DevicePairingScreen({super.key});
 
@@ -20,150 +19,196 @@ class DevicePairingScreen extends StatefulWidget {
   State<DevicePairingScreen> createState() => _DevicePairingScreenState();
 }
 
-class _DevicePairingScreenState extends State<DevicePairingScreen> {
-  /// 有固定配對碼時預先填入,按確認即可。
-  String _code = AppConfig.autoPairingCode;
-  bool _error = false;
+class _DevicePairingScreenState extends State<DevicePairingScreen>
+    with WidgetsBindingObserver {
+  late final DeviceState _device;
 
-  /// 被限流時每秒更新倒數。
+  /// 每秒重畫一次倒數。
   Timer? _ticker;
+  bool _done = false;
 
   @override
   void initState() {
     super.initState();
-    // 剛被限流後重新進入此畫面,倒數照樣進行。
-    _syncTicker(context.read<DeviceState>().pairingCooldown());
+    WidgetsBinding.instance.addObserver(this);
+    _device = context.read<DeviceState>()..addListener(_onDeviceChanged);
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+    // startPairing 會立刻 notifyListeners,不能在 build 期間呼叫。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _device.resumePairing();
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _ticker?.cancel();
+    _device.removeListener(_onDeviceChanged);
+    _device.stopPairing();
     super.dispose();
   }
 
-  /// 有倒數時每秒重畫一次,倒數結束就停。
-  void _syncTicker(Duration? cooldown) {
-    if (cooldown == null) {
-      _ticker?.cancel();
-      _ticker = null;
-      return;
-    }
-    _ticker ??= Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      final left = context.read<DeviceState>().pairingCooldown();
-      setState(() {});
-      if (left == null) {
-        _ticker?.cancel();
-        _ticker = null;
-      }
-    });
-  }
-
-  Future<void> _editCode() async {
-    final value = await showNumericKeypad(
-      context,
-      initial: _code,
-      maxLength: 10,
-    );
-    if (value != null && value != _code) {
-      setState(() {
-        _code = value;
-        _error = false;
-      });
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _device.resumePairing();
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        _device.stopPairing();
+      case AppLifecycleState.inactive:
+        break;
     }
   }
 
-  Future<void> _confirm() async {
-    final device = context.read<DeviceState>();
-    final navigator = Navigator.of(context);
-    final messenger = ScaffoldMessenger.of(context);
-    final ok = await device.pair(_code);
-    if (!mounted) return;
-    if (ok) {
-      messenger.showSnackBar(const SnackBar(content: Text('配對成功')));
-      navigator.popUntil((r) => r.isFirst);
-    } else {
-      setState(() => _error = true);
-      _syncTicker(device.pairingCooldown());
-    }
+  void _onDeviceChanged() {
+    if (!_device.isPaired || _done || !mounted) return;
+    _done = true;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('配對成功')));
+    Navigator.of(context).popUntil((r) => r.isFirst);
+  }
+
+  static String _mmss(Duration d) {
+    final s = d.inSeconds;
+    return '${(s ~/ 60).toString().padLeft(2, '0')}:'
+        '${(s % 60).toString().padLeft(2, '0')}';
   }
 
   @override
   Widget build(BuildContext context) {
     final device = context.watch<DeviceState>();
-    final pairing = device.status == PairingStatus.pairing;
-    final color = _error ? AppColors.error : AppColors.navy;
-    final message = device.pairingError;
-    final cooldown = device.pairingCooldown();
-    final waitSeconds = cooldown == null
-        ? 0
-        : (cooldown.inMilliseconds / 1000).ceil();
+    final code = device.pairingCode;
+    final left = device.pairingTimeLeft();
+    final retryIn = device.pairingRetryIn();
+    final error = device.pairingError;
+    final denied = device.pairingDenied;
+
+    final String statusText;
+    final Color statusColor;
+    if (denied || (error != null && code == null && retryIn == null)) {
+      statusText = error ?? '配對失敗';
+      statusColor = AppColors.error;
+    } else if (error != null && retryIn != null) {
+      statusText = '$error,${retryIn.inSeconds + 1} 秒後重試';
+      statusColor = AppColors.orangeText;
+    } else if (code == null) {
+      statusText = '正在向伺服器取得配對碼…';
+      statusColor = AppColors.navy;
+    } else {
+      statusText = '等待管理員核准…';
+      statusColor = AppColors.navy;
+    }
 
     return Scaffold(
       backgroundColor: Colors.white,
       body: Stack(
         children: [
           Positioned(
-            left: 17,
-            top: 19,
-            child: BackTile(onTap: () => Navigator.of(context).maybePop()),
+            left: 0,
+            right: 0,
+            top: 70,
+            child: Text(
+              '請在管理後台核准此機台',
+              key: const Key('pairing-title'),
+              textAlign: TextAlign.center,
+              style: AppText.size(
+                52,
+                color: AppColors.navy,
+              ).copyWith(letterSpacing: 2),
+            ),
           ),
           Positioned(
             left: 0,
             right: 0,
-            top: 88,
+            top: 150,
             child: Text(
-              _error ? '請重新輸入正確密碼' : '請輸入密碼',
-              key: const Key('pairing-title'),
+              code == null ? '請到管理後台「機台管理」輸入下方的配對碼' : '請到管理後台「機台管理」輸入:$code',
+              key: const Key('pairing-hint'),
+              textAlign: TextAlign.center,
+              style: AppText.size(26, color: AppColors.navy),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 205,
+            child: Container(
+              height: 150,
+              margin: const EdgeInsets.symmetric(horizontal: 212),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: denied ? const Color(0xFFFFECEC) : AppColors.arrowTint,
+                borderRadius: BorderRadius.circular(32),
+              ),
+              child: code == null
+                  ? const SizedBox.square(
+                      dimension: 56,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 5,
+                        color: AppColors.navy,
+                      ),
+                    )
+                  : Text(
+                      code,
+                      key: const Key('pairing-code'),
+                      style: AppText.size(
+                        104,
+                        color: AppColors.navy,
+                      ).copyWith(letterSpacing: 8, fontWeight: FontWeight.w700),
+                    ),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 372,
+            child: Text(
+              left == null ? '' : '配對碼有效時間 ${_mmss(left)}',
+              key: const Key('pairing-countdown'),
               textAlign: TextAlign.center,
               style: AppText.size(
-                60,
-                color: AppColors.navy,
-              ).copyWith(letterSpacing: 4),
+                24,
+                color: AppColors.navy.withValues(alpha: 0.7),
+              ),
             ),
           ),
           Positioned(
-            left: 164,
-            top: 222,
-            child: Icon(Icons.lock_rounded, size: 110, color: color),
-          ),
-          Positioned(
-            left: 310,
-            top: 237,
-            child: PillField(
-              fieldKey: const Key('pairing-code'),
-              value: _code,
-              error: _error,
-              width: 498,
-              height: 90,
-              fontSize: 52,
-              hint: '${AppConstants.pairingCodeLength} 位數配對碼',
-              onTap: _editCode,
+            left: 0,
+            right: 0,
+            top: 412,
+            child: Text(
+              statusText,
+              key: const Key('pairing-status'),
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              style: AppText.size(26, color: statusColor),
             ),
           ),
-          if (_error && message != null)
+          if (denied)
             Positioned(
               left: 0,
               right: 0,
-              top: 340,
-              child: Text(
-                message,
-                key: const Key('pairing-error'),
-                textAlign: TextAlign.center,
-                style: AppText.size(24, color: AppColors.error),
+              top: 480,
+              child: Center(
+                child: PrimaryButton(
+                  key: const Key('pairing-restart'),
+                  label: '重新取得配對碼',
+                  width: 420,
+                  height: 90,
+                  fontSize: 36,
+                  onPressed: device.startPairing,
+                ),
               ),
             ),
+          // 放最後:滿版置中的標題與提示文字會蓋住左上角,返回鍵要在它們之上。
           Positioned(
-            left: 402,
-            top: 391,
-            child: PrimaryButton(
-              key: const Key('pairing-confirm'),
-              label: waitSeconds > 0 ? '$waitSeconds 秒' : '確認',
-              width: 220,
-              height: 90,
-              loading: pairing,
-              onPressed: _code.isEmpty || waitSeconds > 0 ? null : _confirm,
-            ),
+            left: 17,
+            top: 19,
+            child: BackTile(onTap: () => Navigator.of(context).maybePop()),
           ),
         ],
       ),
