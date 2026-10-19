@@ -166,6 +166,29 @@ void main() {
       expect(url('foodintakesystem.com'), 'https://foodintakesystem.com/');
       expect(url('8.8.8.8'), 'https://8.8.8.8/');
       expect(url('172.32.0.1'), 'https://172.32.0.1/', reason: '不在 172.16/12');
+      expect(
+        url('100.110.50.9:8000'),
+        'http://100.110.50.9:8000/',
+        reason: 'Tailscale / CGNAT 100.64/10',
+      );
+      expect(
+        url('100.63.255.255'),
+        'https://100.63.255.255/',
+        reason: '不在 100.64/10',
+      );
+      expect(
+        url('100.128.0.1'),
+        'https://100.128.0.1/',
+        reason: '不在 100.64/10',
+      );
+    });
+
+    test('tailscale (100.64/10) hosts accept http', () {
+      expect(ServerAddress.resolve('http://100.110.50.9:8000').isValid, isTrue);
+      expect(ServerAddress.resolve('http://100.64.0.1').isValid, isTrue);
+      expect(ServerAddress.resolve('http://100.127.255.254').isValid, isTrue);
+      expect(ServerAddress.resolve('http://100.63.255.255').isValid, isFalse);
+      expect(ServerAddress.resolve('http://100.128.0.1').isValid, isFalse);
     });
 
     test('port field is used only when the URL has none', () {
@@ -199,6 +222,9 @@ void main() {
       for (final h in [
         '10.1.2.3',
         '192.168.0.1',
+        '100.64.0.0',
+        '100.110.50.9',
+        '100.127.255.255',
         '127.0.0.1',
         '::1',
         'fd00::1',
@@ -209,7 +235,13 @@ void main() {
       ]) {
         expect(ServerAddress.isPrivateHost(h), isTrue, reason: h);
       }
-      for (final h in ['1.1.1.1', 'foodintakesystem.com', '2001:db8::1']) {
+      for (final h in [
+        '1.1.1.1',
+        '100.63.255.255',
+        '100.128.0.0',
+        'foodintakesystem.com',
+        '2001:db8::1',
+      ]) {
         expect(ServerAddress.isPrivateHost(h), isFalse, reason: h);
       }
     });

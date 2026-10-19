@@ -68,7 +68,8 @@ class ServerAddress {
     return ServerAddress._(uri, null);
   }
 
-  /// 院內區網 / 本機位址:私有 IPv4 (10/8、172.16/12、192.168/16)、loopback、
+  /// 院內區網 / 本機位址:私有 IPv4 (10/8、172.16/12、192.168/16)、
+  /// Tailscale / CGNAT 的 100.64/10 (RFC 6598,不會在公網路由)、loopback、
   /// link-local、IPv6 ULA / link-local、localhost、mDNS 的 `.local`,
   /// 以及沒有點的單段主機名稱 (只可能在區網 DNS 裡)。
   static bool isPrivateHost(String host) {
@@ -86,7 +87,8 @@ class ServerAddress {
     if (ip.type == InternetAddressType.IPv4) {
       return b[0] == 10 ||
           (b[0] == 172 && b[1] >= 16 && b[1] <= 31) ||
-          (b[0] == 192 && b[1] == 168);
+          (b[0] == 192 && b[1] == 168) ||
+          (b[0] == 100 && b[1] >= 64 && b[1] <= 127); // Tailscale / CGNAT
     }
     return (b[0] & 0xfe) == 0xfc; // fc00::/7
   }
