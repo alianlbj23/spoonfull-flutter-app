@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:spoonfull_flutter_app/app.dart';
+import 'package:spoonfull_flutter_app/config/app_config.dart';
+import 'package:spoonfull_flutter_app/data/api/mock_api_repository.dart';
 import 'package:spoonfull_flutter_app/data/models/auth_token.dart';
 import 'package:spoonfull_flutter_app/core/utils/time_utils.dart';
 
@@ -55,16 +57,24 @@ void main() {
     );
     expect(start.onTap, isNull);
 
-    // 設定頁:空白儲存 → 紅色必填提示
+    // 設定頁:位址預設為公開站台,只有場域是必填
     await tester.tap(find.byKey(const Key('welcome-settings')));
     await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<TextField>(find.byKey(const Key('field-host')))
+          .controller
+          ?.text,
+      AppConfig.defaultServerHost,
+    );
+    expect(find.text('將連線到 ${AppConfig.defaultServerHost}/'), findsOneWidget);
     await tester.tap(find.byKey(const Key('save-settings')));
     await tester.pumpAndSettle();
-    expect(find.text('*伺服器位址'), findsOneWidget);
+    expect(find.text('伺服器位址'), findsOneWidget, reason: '預設位址已填,不算缺漏');
     expect(find.text('埠 (選填)'), findsOneWidget, reason: '埠可省略,不是必填');
     expect(find.text('*場域'), findsOneWidget);
 
-    // 填寫設定;埠使用數字鍵盤
+    // 改成其他位址;埠使用數字鍵盤
     await tester.enterText(find.byKey(const Key('field-host')), '10.0.0.5');
     await tester.enterText(find.byKey(const Key('field-place')), 'demo');
     await tester.tap(find.byKey(const Key('field-port')));
@@ -75,27 +85,61 @@ void main() {
     await tester.tap(find.byKey(const Key('save-settings')));
     await tester.pumpAndSettle();
 
-    // 配對頁:錯誤配對碼 → 紅色錯誤狀態
-    expect(find.text('請輸入密碼'), findsOneWidget);
-    await tester.tap(find.byKey(const Key('pairing-code')));
-    await tester.pumpAndSettle();
-    await _enterOnKeypad(tester, '1567960410');
-    await tester.tap(find.byKey(const Key('pairing-confirm')));
-    await tester.pumpAndSettle();
-    expect(find.text('請重新輸入正確密碼'), findsOneWidget);
+    // 配對頁:顯示配對碼與倒數,等管理員在網頁核准 (不再輸入配對碼)
+    expect(find.text('請在管理後台核准此機台'), findsOneWidget);
+    final code = tester
+        .widget<Text>(find.byKey(const Key('pairing-code')))
+        .data!;
+    expect(code, matches(RegExp(r'^[A-Z0-9]{4}-[A-Z0-9]{4}$')));
+    expect(find.text('請到管理後台「機台管理」輸入:$code'), findsOneWidget);
+    expect(find.textContaining('配對碼有效時間 09:'), findsOneWidget);
+    expect(find.text('等待管理員核准…'), findsOneWidget);
+    expect(find.byKey(const Key('key-confirm')), findsNothing);
 
-    // 正確配對碼 → 回到歡迎頁且可開始使用
-    await tester.tap(find.byKey(const Key('pairing-code')));
+    // Mock 在第一次輪詢 (5 秒後) 就核准 → 回到歡迎頁且可開始使用
+    await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
-    for (var i = 0; i < 10; i++) {
-      await tester.tap(find.byKey(const Key('key-backspace')));
-    }
-    await _enterOnKeypad(tester, '123456');
-    await tester.tap(find.byKey(const Key('pairing-confirm')));
-    await tester.pumpAndSettle();
-
+    expect(find.byKey(const Key('pairing-code')), findsNothing);
     expect(find.byKey(const Key('welcome-hint')), findsNothing);
     expect(env.services.storage.deviceConfig.paired, isTrue);
+    expect(
+      env.services.storage.deviceConfig.deviceName,
+      MockApiRepository.mockDeviceName,
+    );
+    await _teardown(tester, env);
+  });
+
+  testWidgets('unpaired but configured: welcome opens pairing automatically', (
+    tester,
+  ) async {
+    final env = await createTestEnv(prefs: configuredPrefs);
+    await _pumpApp(tester, env);
+
+    // 設定齊全、沒有 token → 啟動後直接進入配對畫面
+    expect(find.byKey(const Key('pairing-code')), findsOneWidget);
+
+    // 返回歡迎畫面不會被推回去;「開始使用」可再進入配對
+    await tester.tap(find.bySemanticsLabel('返回').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('pairing-code')), findsNothing);
+    expect(find.textContaining('機台尚未配對'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('start-button')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('pairing-code')), findsOneWidget);
+    await _teardown(tester, env);
+  });
+
+  testWidgets('401 while paired returns to the pairing screen', (tester) async {
+    final env = await _pairedEnv();
+    await _pumpApp(tester, env);
+    await tester.tap(find.byKey(const Key('start-button')));
+    await tester.pumpAndSettle();
+    expect(find.text('在這裡開始進行拍照記錄!'), findsOneWidget);
+
+    env.services.errors.notifyUnauthorized();
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('pairing-code')), findsOneWidget);
+    expect(await env.tokens.read(), isNull);
     await _teardown(tester, env);
   });
 

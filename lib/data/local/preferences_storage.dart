@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../config/app_config.dart';
 import '../models/device_config.dart';
 import '../models/hardware_config.dart';
 
@@ -18,6 +19,7 @@ class PreferencesStorage {
   static const _paired = 'device_config.paired';
   static const _pairingTime = 'device_config.pairing_time';
   static const _lastSync = 'device_config.last_sync';
+  static const _serverDeviceId = 'device_config.server_device_id';
   static const _serverHost = 'server.host';
   static const _serverPort = 'server.port';
 
@@ -45,6 +47,7 @@ class PreferencesStorage {
       paired: _prefs.getBool(_paired) ?? false,
       pairingTime: _prefs.getInt(_pairingTime),
       lastSync: _prefs.getInt(_lastSync),
+      serverDeviceId: _prefs.getInt(_serverDeviceId),
     );
   }
 
@@ -55,10 +58,14 @@ class PreferencesStorage {
     await _prefs.setBool(_paired, c.paired);
     await _setOrRemoveInt(_pairingTime, c.pairingTime);
     await _setOrRemoveInt(_lastSync, c.lastSync);
+    await _setOrRemoveInt(_serverDeviceId, c.serverDeviceId);
   }
 
+  /// 從沒存過伺服器設定的機台 (沒有 host 這個 key) 預設連到
+  /// [AppConfig.defaultServerHost];預設值不寫進偏好,存過一次就以存的為準。
   ServerSettings readServerSettings() {
-    var host = _prefs.getString(_serverHost) ?? '';
+    final stored = _prefs.getString(_serverHost);
+    var host = stored ?? '';
     var port = _prefs.getString(_serverPort) ?? '';
     if ((_prefs.getInt(_serverConfigVersion) ?? 1) < 2) {
       final legacy = legacyBaseUrl(host, port);
@@ -73,6 +80,7 @@ class PreferencesStorage {
       }
       _prefs.setInt(_serverConfigVersion, 2);
     }
+    if (stored == null) host = AppConfig.defaultServerHost;
     return ServerSettings(
       host: host,
       port: port,

@@ -19,7 +19,7 @@ flutter pub get
 flutter run -d linux          # Jetson Orin Nano / Raspberry Pi 5 / Linux 桌面
 flutter run -d windows
 
-# 還沒有接收器時,用內建假資料跑 (配對碼固定為 123456)
+# 還沒有接收器時,用內建假資料跑 (配對不需要管理員,輪詢一次後自動核准)
 flutter run -d windows --dart-define=USE_MOCK_API=true
 ```
 
@@ -28,11 +28,13 @@ flutter run -d windows --dart-define=USE_MOCK_API=true
 - **測試圖片資料夾**:把餐盒照片放進 [test_images/](test_images/),每次「下一步」依檔名順序取下一張(循環)。接 RealSense 之前,用真實照片走完整個上傳流程就用這個。
 - **模擬相機** / **模擬秤**:不需要任何檔案或硬體,自動產生合成圖與假重量。
 
-不經 App、直接用 `test_images/` 的照片加假資料打 server(配對 → 同步 → 上傳 → 去重),用 [tools/send_test_records.py](tools/send_test_records.py):
+不經 App、直接用 `test_images/` 的照片加假資料打 server(配對 → 同步 → 上傳 → 去重),用 [tools/send_test_records.py](tools/send_test_records.py),全部互動選單、不用記參數:
 
 ```bash
-python tools/send_test_records.py --server http://192.168.0.10:8000 --place demo --code 482913 --repeat-last
+python tools/send_test_records.py
 ```
+
+配對流程與 App 相同:印出配對碼 → 請 Super Admin 到管理後台核准 → 輪詢拿 token。
 
 **Linux 機台建置相依**:`clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev`;執行期需要 `gstreamer1.0-tools gstreamer1.0-plugins-good v4l-utils`。開機自動全螢幕 (kiosk) 的安裝步驟見 [deploy/README.md](deploy/README.md)。
 
@@ -40,9 +42,9 @@ python tools/send_test_records.py --server http://192.168.0.10:8000 --place demo
 |---|---|---|
 | `USE_MOCK_API` | `true` / 不設 | `true` 時使用 [mock_api_repository.dart](lib/data/api/mock_api_repository.dart),不發任何 HTTP 請求 |
 | `APP_ENV` | `dev`(預設)/ `test` / `prod` | 只影響 log 等級 |
-| `PAIRING_CODE` | 6 位數字 / 不設 | **測試用固定配對碼**。有設時,儲存伺服器設定後、每次啟動未配對時、以及收到 401 後,App 自動用這組碼配對,不跳鍵盤;server 端需在測試環境接受同一組碼。正式部署不要設 |
 | `APP_BUILD` | 整數 / 不設 (0) | 版本編號,CI 帶入 GitHub Actions 的 run number。0 代表本機編譯,**不會自動更新**。設定頁的「系統狀態」會顯示 |
 | `UPDATE_BASE_URL` | URL / 不設 | 自動更新的下載位置,底下要有 `version.json` 與各平台安裝檔。預設是本 repo 的 GitHub Release `latest` |
+| `DEFAULT_SERVER_URL` | URL / 不設 | 機台**還沒存過**伺服器設定時,設定畫面預設帶入的伺服器位址。預設 `https://foodintakesystem.com`(公開站台,經 Cloudflare)。使用者仍可在設定畫面改成任何位址,存過之後就以存的為準。設成空字串或不合法的網址(例如公開網域用 `http://`)等於沒有預設 |
 
 **支援的平台**:Linux (arm64 / x64) 與 Windows,由 CI 編譯。`macos/` 可當開發機用。`android/`、`ios/`、`web/` 是 `flutter create` 產生的範本,沒有設定相機權限、CI 也不編譯,目前不支援。
 
@@ -61,7 +63,7 @@ CI ([.github/workflows/build.yml](.github/workflows/build.yml)) 在每個 PR 與
 - **版本編號**是 GitHub Actions 的 run number (`APP_BUILD`,畫面上的 build 號碼),pubspec 的版本號不用改。
 - **所有機台會在 10 分鐘內自動更新**,所以 push 到 `main` 前請確定測試通過。新版若啟動就失敗,機台會自動退回上一版並不再安裝這個版本 (見 [deploy/README.md](deploy/README.md) §5);修正後再 push 一版即可。
 
-> 伺服器位址**不寫死在程式裡**:由使用者在機台的設定畫面輸入(見第 2 節)。
+> 伺服器位址由使用者在機台的設定畫面輸入(見第 2 節);新機台預設帶入公開站台 `https://foodintakesystem.com`(可用 `DEFAULT_SERVER_URL` 改預設),要連院內或測試伺服器時直接改掉即可。
 
 **Windows 建置注意**:[windows/CMakeLists.txt](windows/CMakeLists.txt) 已加入 `/utf-8` 與 `_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS`,用來解決非 UTF-8 系統語系(例如日文 CP932)及 VS 2026 下 `connectivity_plus` / `permission_handler_windows` 的編譯錯誤。請勿移除。
 
@@ -89,6 +91,7 @@ main()
  │   └─ 讀加密儲存區 (device_token)
  └─ DeviceState.initialize()                  lib/state/device_state.dart
      ├─ 檢查 token:存在且未過期 → 已配對;已過期 → 清除 → 未配對
+     │    └─ 已配對 → GET api/machine/me/ 確認 token 仍有效並更新機台名稱 (401 → 解除配對)
      ├─ SyncService.start()
      │   ├─ 將上次異常中斷而卡在 processing 的佇列項目改回 pending
      │   ├─ 監聽網路狀態 (斷線 → 恢復時自動同步)
@@ -96,6 +99,7 @@ main()
      │   └─ 若已配對 → 連上推播 api/machine/ws/ (server 資料一變動就重抓,§4.7)
      ├─ 健康檢查 GET api/machine/health/ (歡迎畫面「伺服器」燈號;順便檢查機台時鐘,§4.0)
      └─ 若已配對 → syncAll():更新快取 + 上傳離線佇列
+歡迎畫面:設定齊全但沒有 token (第一次、401 被撤銷、重新配對) → 自動開啟配對畫面
 ```
 
 ### 2.2 第一次使用(操作流程)
@@ -103,11 +107,13 @@ main()
 ```
 歡迎畫面
  └─ 點左上齒輪 → 伺服器設定畫面
-      輸入:伺服器位址 (可輸入完整網址)、埠號 (選填)、場域 (place_id)
-      儲存 ─┬─ 尚未配對 → 配對碼畫面 → 輸入 6 位數配對碼
-            │                 └─ POST api/machine/pair/ → 取得 token
-            │                      └─ 佇列中等待重試的紀錄改成立即上傳,並強制同步 (rooms / beds / meals)
-            └─ 已配對且位址/埠/場域有變更 → 自動解除配對並清除快取 → 需重新配對
+      輸入:伺服器位址 (預設 https://foodintakesystem.com,可改成任何完整網址)、埠號 (選填)、場域 (place_id)
+      儲存 ─┬─ 尚未配對 → 配對畫面 (Device Authorization Flow,§4.1)
+            │     ├─ POST api/machine/pair/start/ → 大字顯示配對碼 (例如 K7QM-42XP) 與倒數
+            │     ├─ 管理員到管理後台「機台管理」輸入配對碼核准 (機台名稱由管理員設定)
+            │     └─ 每 interval 秒 POST api/machine/pair/poll/ → approved 拿到 token
+            │          └─ 佇列中等待重試的紀錄改成立即上傳,並強制同步 (rooms / beds / meals)
+            └─ 已配對且位址/埠/場域有變更 → 自動解除配對並清除快取 → 回歡迎畫面自動開啟配對畫面
 歡迎畫面「開始使用」→ 病房列表 → 床位 → 餐前/餐後 → 放餐盒 → 拍照 + 秤重 (同時) → 品質檢查 → 確認 (時段/膳食/重量) → 上傳
 ```
 
@@ -119,7 +125,7 @@ main()
 
 **BASE_URL 組法**([server_address.dart](lib/core/utils/server_address.dart) `ServerAddress.resolve`,設定畫面在位址欄下方即時顯示「將連線到 …」):
 
-- 位址欄可直接輸入完整網址:公開站台 `https://foodintakesystem.com`、院內 `http://192.168.1.10:8000`
+- 位址欄預設為公開站台 `https://foodintakesystem.com`(沒存過設定時);可直接改成任何完整網址,例如院內 `http://192.168.1.10:8000`
 - **埠可省略**,依協定預設 443(https)/ 80(http);網址裡有寫埠就以網址為準,否則才用埠欄位
 - 只輸入主機名稱 / IP 時:院內區網位址(私有 IP `10.*` / `172.16–31.*` / `192.168.*`、`localhost`、`*.local`、沒有點的單段主機名稱)預設 `http://`,**其他(公開網域)預設 `https://`**
 - 公開網域輸入 `http://` 會被拒絕(「公開網址必須使用 https://…」),避免 token 與照片以明文經過網際網路
@@ -132,7 +138,8 @@ main()
 | 時機 | 發出的請求 |
 |---|---|
 | 啟動、儲存設定、配對成功、按「重新整理資料」 | `GET api/machine/health/`(5 秒逾時;舊版 server 回 404 時退回 `GET /`,有任何 HTTP 回應就算可連線) |
-| 配對 | `POST api/machine/pair/` |
+| 進入配對畫面 | `POST api/machine/pair/start/`,之後每 `interval` 秒 `POST api/machine/pair/poll/` 直到核准、被拒或離開畫面 |
+| 啟動時已配對 | `GET api/machine/me/`(確認 token 仍有效、更新機台名稱) |
 | 配對成功後 | 佇列中所有待上傳紀錄改成立即上傳;三個查詢 API 全部重抓(不帶 `last_updated`),並建立推播連線 `api/machine/ws/` |
 | 推播連線建立(含斷線重連) | 三個查詢 API 全部重抓,補上斷線期間錯過的變動 |
 | 收到推播 `data_changed` | 只重抓事件列出的資料(1.5 秒內的多個事件合併成一次),見 §4.7 |
@@ -153,7 +160,7 @@ main()
 | 協定 | HTTP/1.1(院內區網通常是 `http`;經 Cloudflare 的公開網址一律 `https`) |
 | 編碼 | 回應 body 一律以 **UTF-8** 解碼 |
 | 時間 | 所有時間戳都是 **Unix timestamp(秒)**,不是毫秒 |
-| 認證 | 除了配對以外,所有請求都帶 `Authorization: Bearer {device_token}` |
+| 認證 | 除了配對的 `pair/start/`、`pair/poll/` 與健康檢查以外,所有請求都帶 `Authorization: Bearer {device_token}` |
 | 逾時 | 一般請求 15 秒;上傳 60 秒;健康檢查 5 秒 |
 | 查詢參數 | 值為空字串的參數會被省略,不會送出 |
 | 數字欄位 | 機台可以接受字串數字(`"12"`)或 JSON 數字(`12`),兩者都能解析 |
@@ -171,7 +178,7 @@ main()
 **失敗**:
 
 ```json
-{ "success": false, "error": { "code": "INVALID_PAIRING_CODE", "message": "配對碼無效或已過期", "retryable": false } }
+{ "success": false, "error": { "code": "DENIED", "message": "管理員拒絕了這次配對", "retryable": false } }
 ```
 
 `error.message` 會**直接顯示在機台螢幕上**,請用使用者看得懂的中文(配對錯誤原樣顯示,不加前綴)。
@@ -185,7 +192,7 @@ main()
 |---|---|
 | 2xx + `success:true` | 成功 |
 | 錯誤信封帶 `error.retryable` | **照 server 說的做**(`true` 重試、`false` 不重試) |
-| **401**(JSON 回應),或 JSON 的 `error.code = "TOKEN_EXPIRED"` | 清除 token、**強制解除配對**,回到歡迎畫面;待上傳的資料保留,重新配對後立刻補傳 |
+| **401**(JSON 回應),或 JSON 的 `error.code = "TOKEN_EXPIRED"`(管理員撤銷或重新配對) | 清除 token、**強制解除配對**,回到配對畫面重新取碼;待上傳的資料保留,重新配對後立刻補傳 |
 | 4xx 的 JSON 錯誤信封(403、422、其他 4xx,**408 / 429 除外**) | 顯示錯誤,**不重試** |
 | 408、429 | **會重試**;有 `Retry-After`(秒數或 HTTP 日期)時,下次至少等那麼久 |
 | **5xx** | 進入離線佇列,**會重試** |
@@ -217,46 +224,51 @@ main()
 - 舊版 server 沒有這支(回 **404**)時,退回舊做法:`GET BASE_URL`,有任何 HTTP 回應就算可連線
 - `server_time` 與機台時間相差超過 **120 秒**時,設定畫面與「系統狀態」顯示「機台時間比伺服器快/慢約 N 分鐘…」警告並寫 log(`capture_time` 依賴機台時鐘)
 
-### 4.1 `POST api/machine/pair/` — 機台配對
+### 4.1 機台配對 — Device Authorization Flow
 
-**不帶** `Authorization`。`Content-Type: application/json`
+機台**顯示**配對碼,管理員在網頁核准;機台上不輸入任何東西,機台名稱也由管理員在網頁設定。
+三支 API 都用 `{success, data}` / `{success, error}` 信封。
+
+**`POST api/machine/pair/start/`**(不帶 `Authorization`)
 
 ```json
-{
-  "device_id": "3f1c2a9e-8b7d-4e21-9c55-0a1b2c3d4e5f",
-  "device_name": "Spoonfull-WARD7-3f1c",
-  "location": "WARD7",
-  "pairing_code": "482913"
-}
+{ "hardware_id": "3f1c2a9e-8b7d-4e21-9c55-0a1b2c3d4e5f", "app_version": "1.0.57" }
 ```
 
 | 欄位 | 說明 |
 |---|---|
-| `device_id` | 機台第一次啟動時產生的 UUID v4,重裝 App 才會改變 |
-| `device_name` | 預設為 `Spoonfull-{place_id}-{device_id 前 4 碼}` |
-| `location` | 設定畫面填的**場域**,也就是之後所有查詢用的 `place_id` |
-| `pairing_code` | 6 位數字(機台端已先檢查格式) |
-
-**成功回應**:
+| `hardware_id` | 機台第一次啟動時產生的 UUID v4(`DeviceConfig.deviceId`),重裝 App 才會改變。1–128 個 `A-Za-z0-9._:-` 字元。同一個 `hardware_id` 再配對時,server 視為同一台機台(舊 token 失效) |
+| `app_version` | CI 版為 `1.0.<build>`,本機編譯為 `dev` |
 
 ```json
-{
-  "success": true,
-  "data": {
-    "device_id": "3f1c2a9e-8b7d-4e21-9c55-0a1b2c3d4e5f",
-    "device_token": "eyJhbGciOi...",
-    "token_type": "Bearer",
-    "expires_in": 86400,
-    "message": "Device paired successfully"
-  }
-}
+{ "success": true, "data": { "device_code": "<64 hex>", "pairing_code": "K7QM-42XP", "expires_in": 600, "interval": 5 } }
 ```
 
-- `device_token` **必填且不可為空**,否則配對失敗
-- `expires_in`(秒)可以不給;不給的話機台端視 token 永不過期,只有收到 401 時才會失效
-- 錯誤碼:`INVALID_PAIRING_CODE`(400)、`DEVICE_DISABLED`(422,管理員已停用此機台;重新配對不會自動啟用)、`THROTTLED`(429,嘗試太多次,可帶 `Retry-After` 秒數)、`SERVER_ERROR`
-- 配對失敗時機台**原樣顯示** `error.message`;收到 `THROTTLED` 後配對按鈕停用 `Retry-After` 秒(沒給則 60 秒)並顯示倒數
-- 同一台機台(同 `device_id`)可能因為更改設定或 401 而**再次配對**,接收器應允許重新配對並發放新 token
+- 機台大字顯示 `pairing_code` 與倒數(`expires_in` 秒),提示「請到管理後台『機台管理』輸入:K7QM-42XP」
+- `device_code` 只放在記憶體,不寫 log、不顯示;配對完成、過期、被拒或離開配對畫面就丟掉
+- 錯誤碼:`INVALID_HARDWARE_ID`(400)、`THROTTLED`(429,照 `Retry-After` 等待後自動再試;沒給則等一個 `interval`)
+
+**`POST api/machine/pair/poll/`**(不帶 `Authorization`),每 `interval` 秒一次
+
+```json
+{ "device_code": "<64 hex>" }
+```
+
+| 回應 | 機台行為 |
+|---|---|
+| 200 `{"status": "pending"}` | 繼續等 |
+| 200 `{"status": "approved", "device_token": "spf_…", "device_id": 12, "device_name": "A棟2樓"}` | 存 token(**只會回這一次**)、把 `device_name` 寫進設備配置、進入已配對並觸發一次同步。`device_id` 是 server 的整數 id,另存為 `serverDeviceId`,**不覆蓋** App 的 UUID |
+| 400 `EXPIRED` | 碼過期或失效:自動重新呼叫 `pair/start/` 換新碼,不需要使用者操作 |
+| 403 `DENIED` | 顯示「管理員拒絕了這次配對」與「重新取得配對碼」按鈕,**不自動重試** |
+| 429 `SLOW_DOWN` | 輪詢間隔加 5 秒後繼續 |
+| 連線失敗 / 逾時 / 5xx | 照 §3.4 的重試間隔再試,**不換新碼** |
+
+**`GET api/machine/me/`**(帶 `Authorization`):`{ "device_id": 12, "device_name": "A棟2樓", "location": "WARD7" }`。
+機台啟動時呼叫,確認 token 仍有效並更新顯示名稱;回 401 就走解除配對流程。
+
+- 任何 API 回 **401**(`TOKEN_EXPIRED`,管理員撤銷或重新配對)或 WebSocket 收到 close code **4401**:清掉 token,回到配對畫面重新取碼
+- 離開配對畫面或 App 進背景時停止輪詢;回來時繼續,碼已過期就重新取
+- `error.message` 是中文,機台**原樣顯示**(`DENIED` 固定顯示「管理員拒絕了這次配對」)
 
 ### 4.2 `GET api/machine/rooms/` — 病房列表
 
@@ -431,7 +443,7 @@ main()
 病房、床位、用餐時段在機台上都是快取。為了讓 server 端改了住民房號或用膳時間後**立即**反映在機台,已配對的機台會另外保持一條 WebSocket;server 一有變動就推一則事件,機台收到後馬上重抓對應的查詢 API。沒有這條連線機台也能用(退回 30 分鐘定時同步),所以接收器可以選擇不實作。
 
 - **位址**:`BASE_URL` 的 `http`/`https` 對應成 `ws`/`wss`,路徑 `api/machine/ws/`。例如 `https://foodintakesystem.com/` → `wss://foodintakesystem.com/api/machine/ws/`、`http://192.168.0.10:8000/` → `ws://192.168.0.10:8000/api/machine/ws/`。舊路徑 `ws/machine/` 只在區網還能用,經 Cloudflare 公開網址會被擋
-- **認證**:與 REST 相同,`Authorization: Bearer <device_token>` header。token 無效或機台被停用時,server **先接受再以 close code 4401 關閉**;機台視同 REST 401:清除 token、停止重連、回到配對畫面
+- **認證**:與 REST 相同,`Authorization: Bearer <device_token>` header。token 無效或機台被停用時,server **先接受再以 close code 4401 關閉**;機台視同 REST 401:清除 token、停止重連、回到配對畫面重新取碼
 - **server → 機台**(JSON 文字訊息):
   - 連上後先收 `{ "event": "connected", "device_id": "...", "machine_id": 1, "server_time": "..." }`
   - 之後每次變動收 `{ "event": "data_changed", "datasets": ["rooms", "beds"], "timestamp": 1726900123 }`,`datasets` 是 `rooms` / `beds` / `meals` 的子集:住民新增、修改、刪除 → `rooms` + `beds`;用膳時段或菜單變動 → `meals`
@@ -453,7 +465,8 @@ import time, uuid
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-TOKENS = {}   # token -> device_id
+TOKENS = {}   # token -> hardware_id
+CODES = {}    # device_code -> {"hardware_id", "approved"}
 RECORDS = {}  # dedupe key -> record_id
 
 def ok(data): return jsonify(success=True, data=data)
@@ -466,15 +479,28 @@ def auth():
 @app.get("/")
 def ping(): return "ok"
 
-@app.post("/api/machine/pair/")
-def pair():
+@app.post("/api/machine/pair/start/")
+def pair_start():
     body = request.get_json()
-    if body.get("pairing_code") != "123456":
-        return fail(400, "INVALID_PAIRING_CODE", "配對碼無效或已過期")
-    token = uuid.uuid4().hex
-    TOKENS[token] = body["device_id"]
-    return ok({"device_id": body["device_id"], "device_token": token,
-               "token_type": "Bearer", "expires_in": 86400})
+    code = uuid.uuid4().hex + uuid.uuid4().hex
+    # 示範用:沒有網頁可核准,第一次輪詢就當作管理員核准了
+    CODES[code] = {"hardware_id": body["hardware_id"], "approved": True}
+    return ok({"device_code": code, "pairing_code": "K7QM-42XP", "expires_in": 600, "interval": 5})
+
+@app.post("/api/machine/pair/poll/")
+def pair_poll():
+    entry = CODES.pop(request.get_json().get("device_code"), None)
+    if entry is None:
+        return fail(400, "EXPIRED", "配對碼已過期,請重新取得")
+    token = "spf_" + uuid.uuid4().hex
+    TOKENS[token] = entry["hardware_id"]
+    return ok({"status": "approved", "device_token": token, "device_id": 1, "device_name": "示範機台"})
+
+@app.get("/api/machine/me/")
+def me():
+    hw = auth()
+    if not hw: return fail(401, "TOKEN_EXPIRED", "認證失敗,需要重新配對")
+    return ok({"device_id": 1, "device_name": "示範機台", "location": "demo"})
 
 @app.get("/api/machine/rooms/")
 def rooms():
@@ -526,7 +552,7 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
 ```
 
-在機台設定畫面輸入接收器的 IP、埠號 `8080`、任意場域,再用配對碼 `123456` 配對,就能走完整個流程。
+在機台設定畫面輸入接收器的 IP、埠號 `8080`、任意場域,儲存後進入配對畫面;這個示範接收器在第一次輪詢就核准,不需要網頁操作。
 
 用 curl 模擬機台上傳:
 
@@ -557,6 +583,7 @@ curl -X POST http://localhost:8080/api/machine/records/ \
 | 硬體設定頁 | [lib/ui/screens/hardware_settings_screen.dart](lib/ui/screens/hardware_settings_screen.dart) |
 | 機台安裝 (kiosk、udev、NTP、HX711 bridge) | [deploy/](deploy/) |
 | 不經 App 打 server 的測試腳本 | [tools/send_test_records.py](tools/send_test_records.py) |
+| App 圖示 (Windows / macOS / Linux) 產生腳本 | [tools/make_icons.py](tools/make_icons.py),原圖在 [assets/icon/app_icon.png](assets/icon/app_icon.png) |
 | 上傳與離線佇列 | [lib/services/record_service.dart](lib/services/record_service.dart)、[lib/services/offline_queue_service.dart](lib/services/offline_queue_service.dart) |
 | 同步時機 | [lib/services/sync_service.dart](lib/services/sync_service.dart) |
 | 啟動流程 | [lib/main.dart](lib/main.dart)、[lib/state/device_state.dart](lib/state/device_state.dart) |

@@ -1,3 +1,5 @@
+import '../core/utils/server_address.dart';
+
 /// 環境配置 (規格 12.2)。
 ///
 /// 以 `--dart-define=APP_ENV=dev|test|prod` 切換環境,
@@ -16,17 +18,34 @@ class AppConfig {
 
   static const bool useMockApi = bool.fromEnvironment('USE_MOCK_API');
 
-  /// 開發 / 測試用固定配對碼 (`--dart-define=PAIRING_CODE=123456`)。
-  ///
-  /// 有設定時,儲存伺服器設定後與每次啟動若尚未配對,App 會自動用這組碼配對,
-  /// 不用在機台上輸入;server 端需在測試環境接受同一組碼。正式部署不要設定。
-  static const String autoPairingCode = String.fromEnvironment('PAIRING_CODE');
-
-  static bool get hasAutoPairingCode => autoPairingCode.isNotEmpty;
-
   /// CI 編譯時帶入的遞增版本編號 (`--dart-define=APP_BUILD=<run number>`)。
   /// 本機編譯為 0,這時不會自動更新。
   static const int buildNumber = int.fromEnvironment('APP_BUILD');
+
+  /// 送給 server 的 App 版本 (`pair/start/` 的 `app_version`):CI 版與
+  /// `--build-name` 相同 (`1.0.<build>`),本機編譯為 `dev`。
+  static String get appVersion => buildNumber > 0 ? '1.0.$buildNumber' : 'dev';
+
+  /// 機台還沒存過伺服器設定時,設定畫面預設帶入的伺服器位址
+  /// (`--dart-define=DEFAULT_SERVER_URL=...`)。使用者可在設定畫面改成任何位址;
+  /// 存過之後就以存的為準。
+  static const String _defaultServerUrl = String.fromEnvironment(
+    'DEFAULT_SERVER_URL',
+    defaultValue: 'https://foodintakesystem.com',
+  );
+
+  /// [_defaultServerUrl] 去掉結尾的 `/`,直接當設定畫面的位址欄內容。
+  /// 設成空字串或不合法的網址 (格式錯誤、公開網域用 http) 時為空字串,
+  /// 等於沒有預設,使用者要自己填。
+  static final String defaultServerHost = _normalizeDefault(_defaultServerUrl);
+
+  static String _normalizeDefault(String raw) {
+    var h = raw.trim();
+    while (h.endsWith('/')) {
+      h = h.substring(0, h.length - 1);
+    }
+    return ServerAddress.resolve(h).isValid ? h : '';
+  }
 
   /// 自動更新的下載位置:底下要有 `version.json` 與各平台的安裝檔。
   static const String updateBaseUrl = String.fromEnvironment(

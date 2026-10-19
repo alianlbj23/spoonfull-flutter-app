@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:spoonfull_flutter_app/config/app_config.dart';
 import 'package:spoonfull_flutter_app/core/errors/app_exception.dart';
 import 'package:spoonfull_flutter_app/core/utils/server_address.dart';
 import 'package:spoonfull_flutter_app/core/utils/validators.dart';
@@ -28,11 +29,17 @@ BedData _bed(String id, String? patient) => BedData(
 );
 
 void main() {
-  test('pairing code must be 6 digits', () {
-    expect(() => Validators.pairingCode('123456'), returnsNormally);
-    expect(() => Validators.pairingCode('12345'), _throwsValidation);
-    expect(() => Validators.pairingCode('1567960410'), _throwsValidation);
-    expect(() => Validators.pairingCode('12a456'), _throwsValidation);
+  test('hardware id is 1–128 chars of A-Za-z0-9._:-', () {
+    expect(
+      () => Validators.hardwareId('3f1c2a9e-8b7d-4e21-9c55-0a1b2c3d4e5f'),
+      returnsNormally,
+    );
+    expect(() => Validators.hardwareId('pi.local:01'), returnsNormally);
+    expect(() => Validators.hardwareId('a' * 128), returnsNormally);
+    expect(() => Validators.hardwareId(''), _throwsValidation);
+    expect(() => Validators.hardwareId('a' * 129), _throwsValidation);
+    expect(() => Validators.hardwareId('bad id'), _throwsValidation);
+    expect(() => Validators.hardwareId('機台'), _throwsValidation);
   });
 
   test('image dimensions 480x320 ~ 4000x3000 in either orientation', () {
@@ -255,6 +262,37 @@ void main() {
         'server.port': '8080',
       });
       expect(p2.readServerSettings().baseUrl, 'http://192.168.0.10:8080/');
+    });
+
+    test('fresh install defaults to the public server', () async {
+      final p = await prefs({});
+      final s = p.readServerSettings();
+      expect(AppConfig.defaultServerHost, 'https://foodintakesystem.com');
+      expect(s.host, AppConfig.defaultServerHost);
+      expect(s.baseUrl, 'https://foodintakesystem.com/');
+      expect(s.isComplete, isFalse, reason: '場域仍要由使用者填');
+      // 預設值不寫進偏好,再讀一次仍是預設。
+      expect(p.readServerSettings().host, AppConfig.defaultServerHost);
+    });
+
+    test('a saved address replaces the default', () async {
+      final p = await prefs({});
+      await p.writeServerSettings(
+        const ServerSettings(host: '192.168.1.10', port: '8000', placeId: 'A'),
+      );
+      expect(p.readServerSettings().baseUrl, 'http://192.168.1.10:8000/');
+    });
+
+    test('fresh install without a place still checks the default server', () {
+      // checkServer 只看位址;場域留空時歡迎畫面的伺服器燈號仍有意義。
+      const s = ServerSettings(host: 'https://foodintakesystem.com');
+      expect(s.baseUrl, isNotNull);
+      expect(s.isComplete, isFalse);
+    });
+
+    test('a saved empty address is not replaced by the default', () async {
+      final p = await prefs({'server.host': '', 'server.config_version': 2});
+      expect(p.readServerSettings().host, '');
     });
 
     test('new-format settings are not rewritten', () async {
