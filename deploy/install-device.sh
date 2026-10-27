@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# 機台 (Jetson Orin Nano / Raspberry Pi 5) 一次性安裝腳本 (ARCHITECTURE.md §5)。
+# 機台 (Raspberry Pi 5;Jetson Orin Nano 次要) 一次性安裝腳本 (ARCHITECTURE.md §5)。
 #
 # 做的事:
-#   1. 安裝 GStreamer (相機擷取)、v4l-utils、libsecret (token 儲存)、GTK 執行期
-#   2. 開放 /dev/hidraw* (USB HID 秤)、/dev/ttyUSB*、/dev/ttyACM* (序列埠秤) 權限
+#   1. 安裝 RealSense bridge 的 Python 相依 (numpy / OpenCV)、libsecret (token 儲存)、GTK 執行期
+#      (librealsense + pyrealsense2 要先用 deploy/build-librealsense.sh 編好,或 dpkg -i 之前編的 .deb)
+#   2. 開放 RealSense (USB)、/dev/hidraw* (USB HID 秤)、/dev/ttyUSB*、/dev/ttyACM* (序列埠秤) 權限
 #   3. 啟用 NTP 自動校時 (capture_time 要可信)
 #   4. 下載最新版 App 到 /opt/spoonfull (已經有就略過),安裝 kiosk systemd 服務
-#      (開機自動全螢幕啟動 App,自動更新失敗時退回上一版)
+#      (開機自動全螢幕啟動 App,自動更新失敗時退回上一版);同時放一份 realsense_bridge.py
 #   5. (選用) HX711 GPIO bridge 服務
 #
 # 用法 (在機台上):
@@ -40,17 +41,18 @@ fi
 echo "== 1/5 套件"
 apt-get update
 apt-get install -y \
-  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  v4l-utils libsecret-1-0 libjsoncpp25 libgtk-3-0 \
-  systemd-timesyncd python3 curl || apt-get install -y \
-  gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-  v4l-utils libsecret-1-0 libgtk-3-0 python3 curl
+  python3 python3-numpy python3-opencv \
+  libsecret-1-0 libjsoncpp25 libgtk-3-0 libusb-1.0-0 \
+  systemd-timesyncd curl || apt-get install -y \
+  python3 python3-numpy python3-opencv \
+  libsecret-1-0 libgtk-3-0 libusb-1.0-0 curl
 
-if [[ -f /etc/nv_tegra_release ]]; then
-  echo "   偵測到 Jetson:CSI 相機請在 App 硬體設定選「Jetson CSI 相機」(nvarguscamerasrc 由 JetPack 提供)"
-fi
-if grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
-  echo "   偵測到 Raspberry Pi:CSI 相機請安裝 rpicam-apps (apt-get install -y rpicam-apps)"
+if sudo -u "$APP_USER" python3 -c "import pyrealsense2" 2>/dev/null; then
+  echo "   pyrealsense2 已安裝"
+else
+  echo "   注意:找不到 pyrealsense2。RealSense D435f 需要它:"
+  echo "         Raspberry Pi → 以一般使用者執行 $HERE/build-librealsense.sh (約 30–45 分鐘),"
+  echo "         或 dpkg -i 之前機台編好的 librealsense2-*.deb;x86_64 → pip install pyrealsense2"
 fi
 
 echo "== 2/5 裝置權限 (udev)"
@@ -80,6 +82,9 @@ if [[ ! -x "$INSTALL_DIR/spoonfull_flutter_app" ]]; then
   echo "   注意:$INSTALL_DIR 裡還沒有 App。請把 bundle/* 複製進去 (見 deploy/README.md)。"
 fi
 install -m 755 "$HERE/spoonfull-recover.sh" "$INSTALL_DIR/spoonfull-recover.sh"
+# RealSense 擷取程式:App 會先用 bundle 內 data/flutter_assets/deploy/ 的版本 (隨自動更新),
+# 這份是 bundle 缺檔時的後備 (lib/services/hardware/camera_service.dart)
+install -m 755 "$HERE/realsense_bridge.py" "$INSTALL_DIR/realsense_bridge.py"
 # App 以 $APP_USER 執行,自動更新要能替換這個資料夾裡的檔案 (lib/services/update_service.dart)
 chown -R "$APP_USER" "$INSTALL_DIR"
 sed "s/__USER__/$APP_USER/g" "$HERE/spoonfull-kiosk.service" > /etc/systemd/system/spoonfull-kiosk.service
@@ -100,4 +105,6 @@ fi
 
 echo
 echo "完成。重新開機後 App 會全螢幕啟動;現在可用 sudo systemctl start spoonfull-kiosk 先試跑。"
-echo "請重新登入 $APP_USER 讓群組 (video / dialout) 生效。"
+echo "請重新登入 $APP_USER 讓群組 (plugdev / video / dialout) 生效。"
+echo "相機:把 D435f 接到 USB 3 埠,執行 python3 $INSTALL_DIR/realsense_bridge.py --probe 應印出序號;"
+echo "      App 的硬體設定 → 相機來源「RealSense D435f (RGB-D)」→「偵測相機」→「測試拍照」。"

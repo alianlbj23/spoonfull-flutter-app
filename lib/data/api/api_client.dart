@@ -67,6 +67,21 @@ class UnauthorizedInterceptor extends ApiInterceptor {
 }
 
 /// 封裝後端統一回應格式 `{success, data, error}`。
+/// multipart 上傳的一個檔案欄位。
+class UploadPart {
+  const UploadPart({
+    required this.field,
+    required this.bytes,
+    required this.fileName,
+    required this.mimeType,
+  });
+
+  final String field;
+  final List<int> bytes;
+  final String fileName;
+  final String mimeType;
+}
+
 class ApiClient {
   ApiClient({
     required this.baseUrlProvider,
@@ -96,10 +111,7 @@ class ApiClient {
     return q.isEmpty ? uri : uri.replace(queryParameters: q);
   }
 
-  Future<Map<String, Object?>> get(
-    String path, {
-    Map<String, String>? query,
-  }) {
+  Future<Map<String, Object?>> get(String path, {Map<String, String>? query}) {
     final request = http.Request('GET', _uri(path, query))
       ..headers['Content-Type'] = 'application/json';
     return _send(request, AppConstants.requestTimeout);
@@ -120,21 +132,20 @@ class ApiClient {
   Future<Map<String, Object?>> postMultipart(
     String path, {
     required Map<String, String> fields,
-    required String fileField,
-    required List<int> fileBytes,
-    required String fileName,
-    required String mimeType,
+    required List<UploadPart> files,
   }) {
     final request = http.MultipartRequest('POST', _uri(path))
-      ..fields.addAll(fields)
-      ..files.add(
+      ..fields.addAll(fields);
+    for (final f in files) {
+      request.files.add(
         http.MultipartFile.fromBytes(
-          fileField,
-          fileBytes,
-          filename: fileName,
-          contentType: MediaType.parse(mimeType),
+          f.field,
+          f.bytes,
+          filename: f.fileName,
+          contentType: MediaType.parse(f.mimeType),
         ),
       );
+    }
     return _send(request, AppConstants.uploadTimeout);
   }
 
@@ -211,10 +222,7 @@ class ApiClient {
       );
     } on IOException catch (e) {
       // SocketException、HttpException 等,一律當成暫時性的連線問題。
-      throw _fail(
-        request,
-        AppException(AppErrorType.network, '無法連線到伺服器: $e'),
-      );
+      throw _fail(request, AppException(AppErrorType.network, '無法連線到伺服器: $e'));
     }
     for (final i in _interceptors) {
       i.onResponse(request, response);

@@ -77,6 +77,8 @@ flutter:
     - assets/images/
     # App 圖示原圖 (tools/make_icons.py 產生);Linux 視窗圖示從 bundle 裡載入這張。
     - assets/icon/
+    # RealSense 擷取程式隨 App 一起發佈 (data/flutter_assets/deploy/),自動更新也會帶到
+    - deploy/realsense_bridge.py
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:spoonfull_flutter_app/config/app_constants.dart';
 import 'package:spoonfull_flutter_app/core/errors/app_exception.dart';
 import 'package:spoonfull_flutter_app/core/utils/time_utils.dart';
@@ -42,7 +44,7 @@ class _CountingCamera extends CameraService {
   String get description => 'counting';
 
   @override
-  Future<String?> capture(String outputPath) async {
+  Future<RawCapture?> capture(String outputPath) async {
     calls++;
     if (cancel) return null;
     return const MockCameraService(width: 640, height: 480).capture(outputPath);
@@ -104,6 +106,154 @@ void main() {
     expect(result.weight!.stable, isTrue);
     // 原始擷取檔已刪除
     expect(await File('${result.imagePath}.raw.jpg').exists(), isFalse);
+  });
+
+  group('RGB-D', () {
+    late TestEnv rgbd;
+
+    setUp(() async {
+      rgbd = await createTestEnv(
+        api: api,
+        prefs: configuredPrefs,
+        camera: const MockCameraService(
+          width: 640,
+          height: 480,
+          withDepth: true,
+        ),
+      );
+      await pairWithMock(rgbd);
+      await rgbd.services.sync.start();
+      await rgbd.services.sync.refreshCache(force: true);
+    });
+
+    tearDown(() => rgbd.dispose());
+
+    Future<UploadOutcome> uploadRgbd(CaptureResult c) async {
+      final storage = rgbd.services.storage;
+      final beds = await storage.getBeds('demo', roomId: 'R101');
+      final meals = await storage.getMeals('demo');
+      final slots = await storage.getTimeSlots('demo');
+      return rgbd.services.records.createAndUpload(
+        bed: beds.firstWhere((b) => b.hasPatient),
+        roomBeds: beds,
+        meal: meals.first,
+        meals: meals,
+        timeSlot: slots.first,
+        phase: MealPhase.before,
+        imagePath: c.imagePath,
+        depthPath: c.depthPath,
+        depthMetaPath: c.depthMetaPath,
+        deviceId: storage.deviceConfig.deviceId,
+        quality: c.quality,
+      );
+    }
+
+    test('capture keeps the depth map beside the photo', () async {
+      final result = (await rgbd.services.records.capture())!;
+      expect(result.hasDepth, isTrue);
+      expect(
+        result.depthPath,
+        '${p.withoutExtension(result.imagePath)}_depth.png',
+      );
+      expect(result.depthMetaPath, endsWith('_depth.json'));
+      expect(File(result.depthPath!).existsSync(), isTrue);
+      expect(result.depth!.width, result.width);
+      expect(result.depth!.height, result.height);
+      expect(result.depth!.validRatio, greaterThan(0.9));
+      expect(result.depth!.centerMedianMm, 575);
+      // meta 內已補上統計
+      final meta = jsonDecode(File(result.depthMetaPath!).readAsStringSync());
+      expect(meta['stats']['center_median_mm'], 575);
+      expect(meta['depth_unit_m'], 0.001);
+      // 原始擷取檔都已清掉
+      final leftovers = (await rgbd.services.hardware.imagesDirectory())
+          .listSync()
+          .map((f) => p.basename(f.path))
+          .where((n) => n.contains('.raw'));
+      expect(leftovers, isEmpty);
+    });
+
+    test('upload carries depth paths and flags depth_attached', () async {
+      final c = (await rgbd.services.records.capture())!;
+      final outcome = await uploadRgbd(c);
+      expect(outcome.status, UploadOutcomeStatus.synced);
+      final sent = api.uploads.single;
+      expect(sent.depthPath, c.depthPath);
+      expect(sent.depthMetaPath, c.depthMetaPath);
+      expect(sent.fields['edge_result'], contains('"depth_attached":true'));
+      final saved = await rgbd.services.storage.getRecord(
+        outcome.record.localId,
+      );
+      expect(saved!.depthPath, c.depthPath);
+      expect(saved.depthMetaPath, c.depthMetaPath);
+    });
+
+    test('queued upload restores depth paths after restart', () async {
+      rgbd.connectivity.online = false;
+      await pumpEventQueue();
+      final c = (await rgbd.services.records.capture())!;
+      await uploadRgbd(c);
+      final item = (await rgbd.services.queue.pendingItems()).single;
+      final restored = MealRecordUpload.fromJson(item.requestData);
+      expect(restored.depthPath, c.depthPath);
+      expect(restored.depthMetaPath, c.depthMetaPath);
+    });
+
+    test('discarding a photo removes its depth files', () async {
+      final c = (await rgbd.services.records.capture())!;
+      await rgbd.services.records.discardImage(c.imagePath);
+      expect(File(c.imagePath).existsSync(), isFalse);
+      expect(File(c.depthPath!).existsSync(), isFalse);
+      expect(File(c.depthMetaPath!).existsSync(), isFalse);
+    });
+
+    test('missing depth file uploads RGB only', () async {
+      final c = (await rgbd.services.records.capture())!;
+      File(c.depthPath!).deleteSync();
+      final outcome = await uploadRgbd(c);
+      expect(outcome.status, UploadOutcomeStatus.synced);
+      expect(api.uploads.single.depthPath, isNull);
+      expect(outcome.record.depthPath, isNull);
+    });
+
+    test('purge removes expired depth files with the photo', () async {
+      final c = (await rgbd.services.records.capture())!;
+      final outcome = await uploadRgbd(c);
+      final old = DateTime.now().add(
+        AppConstants.syncedImageRetention + const Duration(days: 1),
+      );
+      final deleted = await rgbd.services.records.purgeExpired(now: old);
+      expect(deleted, 3);
+      expect(File(c.imagePath).existsSync(), isFalse);
+      expect(File(c.depthPath!).existsSync(), isFalse);
+      expect(File(c.depthMetaPath!).existsSync(), isFalse);
+      expect(
+        await rgbd.services.storage.getRecord(outcome.record.localId),
+        isNotNull,
+        reason: '紀錄保留 90 天',
+      );
+    });
+
+    test(
+      'orphan cleanup leaves depth files of pending records alone',
+      () async {
+        rgbd.connectivity.online = false;
+        await pumpEventQueue();
+        final c = (await rgbd.services.records.capture())!;
+        await uploadRgbd(c);
+        final later = DateTime.now().add(const Duration(days: 2));
+        await rgbd.services.records.purgeExpired(now: later);
+        expect(File(c.depthPath!).existsSync(), isTrue);
+        expect(File(c.depthMetaPath!).existsSync(), isTrue);
+      },
+    );
+
+    test('reference capture does not keep depth files', () async {
+      final ref = await rgbd.services.hardware.captureReference();
+      expect(File(ref).existsSync(), isTrue);
+      final dir = File(ref).parent.listSync().map((f) => p.basename(f.path));
+      expect(dir.where((n) => n.contains('depth')), isEmpty);
+    });
   });
 
   test('file capture uses the file picker instead of the camera', () async {
@@ -244,7 +394,7 @@ void main() {
     expect(env.services.storage.hardwareConfig.scale.kind, ScaleKind.none);
     expect(
       env.services.storage.hardwareConfig.camera.source,
-      CameraSource.auto,
+      CameraSource.platformDefault,
     );
   });
 
@@ -308,6 +458,8 @@ void main() {
     expect(record.weightSource, WeightSource.none);
     expect(record.quality, isNull);
     expect(record.serverFlags, isEmpty, reason: 'v3 server_flags 欄位');
+    expect(record.depthPath, isNull, reason: 'v4 depth_path 欄位');
+    expect(record.depthMetaPath, isNull);
     final meal = MealData.fromDb((await upgraded.db.query('meals')).single);
     expect(meal.assignedPatientIds, isEmpty, reason: 'v3 新欄位預設空');
     await upgraded.close();

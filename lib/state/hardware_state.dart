@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../data/models/hardware_config.dart';
 import '../data/models/weight_reading.dart';
 import '../services/app_services.dart';
+import '../services/hardware/camera_service.dart';
 import '../services/hardware/hardware_service.dart';
 import '../services/hardware/scale_service.dart';
 
@@ -21,6 +22,9 @@ class HardwareState extends ChangeNotifier {
   bool busy = false;
   String? error;
   CaptureResult? lastTest;
+
+  /// 最近一次「偵測相機」的結果。
+  RealSenseInfo? cameraInfo;
   WeightReading? liveReading;
   StreamSubscription<WeightReading>? _liveSub;
 
@@ -29,6 +33,12 @@ class HardwareState extends ChangeNotifier {
     await stopLiveWeight();
     notifyListeners();
   }
+
+  /// 偵測 RealSense 相機;結果放在 [cameraInfo],失敗原因放在 [error]。
+  Future<void> probeCamera() => _guard(() async {
+    cameraInfo = null;
+    cameraInfo = await _services.hardware.probeCamera();
+  });
 
   Future<void> testCapture() => _guard(() async {
     lastTest = await _services.hardware.testCapture();

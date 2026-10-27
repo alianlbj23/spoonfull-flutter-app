@@ -1,51 +1,53 @@
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+
 import '../../config/app_constants.dart';
 
-/// 相機來源 (ARCHITECTURE.md §5.1:Linux 不能用 image_picker 開相機,改用 GStreamer / V4L2)。
+/// 相機來源 (ARCHITECTURE.md §5.1)。機台固定用 Intel RealSense D435f 拍 RGB-D;
+/// 桌面開發與測試用「選擇圖片」。
 enum CameraSource {
-  /// 依平台與裝置自動判斷:Linux 有 /dev/video* → v4l2;Jetson 無 USB 相機 → nvargus;
-  /// Raspberry Pi 無 USB 相機 → libcamera;其他平台 → picker。
-  auto('自動'),
-
-  /// USB / UVC 相機,GStreamer `v4l2src`。
-  v4l2('USB 相機 (V4L2)'),
-
-  /// Jetson CSI 相機,GStreamer `nvarguscamerasrc`。
-  nvargus('Jetson CSI 相機'),
-
-  /// Raspberry Pi CSI 相機,`rpicam-still` / `libcamera-still`。
-  libcamera('Pi CSI 相機 (libcamera)'),
+  /// Intel RealSense D435f:經 deploy/realsense_bridge.py 擷取 RGB + 對齊深度圖。
+  realsense('RealSense D435f (RGB-D)'),
 
   /// image_picker (Android / iOS 相機;桌面為選擇檔案),開發用。
-  picker('系統相機 / 選檔'),
-
-  /// 依序取用資料夾裡的照片 (測試用:`device` 欄位填資料夾路徑,預設 `test_images`)。
-  folder('測試圖片資料夾'),
-
-  /// 產生合成測試圖,沒有相機時用。
-  mock('模擬相機');
+  picker('選擇圖片');
 
   const CameraSource(this.label);
   final String label;
 
-  static CameraSource parse(String? v) => CameraSource.values.firstWhere(
-    (s) => s.name == v,
-    orElse: () => CameraSource.auto,
-  );
+  /// 舊版設定值 (`auto` / `v4l2` / `nvargus` / `libcamera` / `folder` / `mock`)
+  /// 一律轉成 RealSense;沒有存過設定 (null) 時依平台:Linux 機台 → RealSense,
+  /// 其他平台 → 選擇圖片。
+  static CameraSource parse(String? v) {
+    if (v == null) return platformDefault;
+    return CameraSource.values.firstWhere(
+      (s) => s.name == v,
+      orElse: () => CameraSource.realsense,
+    );
+  }
+
+  static CameraSource get platformDefault => !kIsWeb && Platform.isLinux
+      ? CameraSource.realsense
+      : CameraSource.picker;
 }
 
 class CameraSettings {
   const CameraSettings({
-    this.source = CameraSource.auto,
-    this.device = '/dev/video0',
+    this.source = CameraSource.realsense,
+    this.device = '',
     this.width = AppConstants.captureWidth,
     this.height = AppConstants.captureHeight,
     this.warmupFrames = AppConstants.captureWarmupFrames,
-    this.mjpeg = false,
   });
+
+  /// 沒有存過設定時的預設值 (相機來源依平台)。
+  factory CameraSettings.platformDefault() =>
+      CameraSettings(source: CameraSource.platformDefault);
 
   final CameraSource source;
 
-  /// V4L2 裝置路徑;nvargus 為 sensor-id (數字字串);libcamera 為 camera index。
+  /// RealSense 序號;空字串 = 用找到的第一台 (只接一台時不用填)。
   final String device;
   final int width;
   final int height;
@@ -53,23 +55,18 @@ class CameraSettings {
   /// 擷取前丟掉的暖機張數 (自動曝光需要時間)。
   final int warmupFrames;
 
-  /// V4L2 要求相機直接輸出 MJPEG (高解析度 USB 相機較快)。
-  final bool mjpeg;
-
   CameraSettings copyWith({
     CameraSource? source,
     String? device,
     int? width,
     int? height,
     int? warmupFrames,
-    bool? mjpeg,
   }) => CameraSettings(
     source: source ?? this.source,
     device: device ?? this.device,
     width: width ?? this.width,
     height: height ?? this.height,
     warmupFrames: warmupFrames ?? this.warmupFrames,
-    mjpeg: mjpeg ?? this.mjpeg,
   );
 
   Map<String, Object?> toJson() => {
@@ -78,19 +75,30 @@ class CameraSettings {
     'width': width,
     'height': height,
     'warmup_frames': warmupFrames,
-    'mjpeg': mjpeg,
   };
 
-  factory CameraSettings.fromJson(Map<String, Object?> json) => CameraSettings(
-    source: CameraSource.parse(json['source'] as String?),
-    device: json['device'] as String? ?? '/dev/video0',
-    width: (json['width'] as num?)?.toInt() ?? AppConstants.captureWidth,
-    height: (json['height'] as num?)?.toInt() ?? AppConstants.captureHeight,
-    warmupFrames:
-        (json['warmup_frames'] as num?)?.toInt() ??
-        AppConstants.captureWarmupFrames,
-    mjpeg: json['mjpeg'] as bool? ?? false,
-  );
+  factory CameraSettings.fromJson(Map<String, Object?> json) {
+    final source = CameraSource.parse(json['source'] as String?);
+    var device = json['device'] as String? ?? '';
+    // 舊版的 V4L2 路徑 / sensor-id / 圖片資料夾對 RealSense 沒有意義 (序號欄位)。
+    if (source == CameraSource.realsense &&
+        (device.startsWith('/dev/') || !_looksLikeSerial(device))) {
+      device = '';
+    }
+    return CameraSettings(
+      source: source,
+      device: device,
+      width: (json['width'] as num?)?.toInt() ?? AppConstants.captureWidth,
+      height: (json['height'] as num?)?.toInt() ?? AppConstants.captureHeight,
+      warmupFrames:
+          (json['warmup_frames'] as num?)?.toInt() ??
+          AppConstants.captureWarmupFrames,
+    );
+  }
+
+  /// RealSense 序號是 12 位數字 (mock 為 MOCK 開頭)。
+  static bool _looksLikeSerial(String v) =>
+      RegExp(r'^[0-9A-Za-z]{6,}$').hasMatch(v);
 }
 
 /// 秤的連接方式。

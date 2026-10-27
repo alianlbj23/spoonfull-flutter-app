@@ -135,13 +135,41 @@ class HttpApiRepository implements ApiRepository {
     }
     final bytes = await file.readAsBytes();
     final ext = p.extension(upload.imagePath).toLowerCase();
+    final fields = Map<String, String>.of(upload.fields);
+    final files = [
+      UploadPart(
+        field: 'image',
+        bytes: bytes,
+        fileName: p.basename(upload.imagePath),
+        mimeType: ext == '.png' ? 'image/png' : 'image/jpeg',
+      ),
+    ];
+    // RealSense 深度圖:`depth` (16-bit PNG, mm) 與 `depth_meta` (內參等 JSON 字串)。
+    // 深度檔不見了只送 RGB (照片才是必要欄位)。
+    final depthPath = upload.depthPath;
+    if (depthPath != null) {
+      final depthFile = File(depthPath);
+      if (await depthFile.exists()) {
+        files.add(
+          UploadPart(
+            field: 'depth',
+            bytes: await depthFile.readAsBytes(),
+            fileName: p.basename(depthPath),
+            mimeType: 'image/png',
+          ),
+        );
+        final metaPath = upload.depthMetaPath;
+        if (metaPath != null && await File(metaPath).exists()) {
+          fields['depth_meta'] = await File(metaPath).readAsString();
+        }
+      } else {
+        Log.i('record ${upload.clientRecordId}: depth file missing, RGB only');
+      }
+    }
     final data = await _client.postMultipart(
       AppConstants.mealRecordPath,
-      fields: upload.fields,
-      fileField: 'image',
-      fileBytes: bytes,
-      fileName: p.basename(upload.imagePath),
-      mimeType: ext == '.png' ? 'image/png' : 'image/jpeg',
+      fields: fields,
+      files: files,
     );
     final result = MealRecordResult.fromJson(data);
     if (result.duplicate || result.assignmentMismatch || result.bedMismatch) {

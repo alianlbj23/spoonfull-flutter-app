@@ -221,9 +221,16 @@ class MealRecordUpload {
     required this.clientRecordId,
     this.weightG,
     this.edgeResult,
+    this.depthPath,
+    this.depthMetaPath,
   });
 
   final String imagePath;
+
+  /// RealSense 深度圖 (multipart 欄位 `depth`, image/png) 與 meta (`depth_meta`, JSON 字串);
+  /// 沒有深度時不送這兩個欄位。
+  final String? depthPath;
+  final String? depthMetaPath;
   final String bedId;
   final String patientId;
   final String mealId;
@@ -266,6 +273,8 @@ class MealRecordUpload {
     'weight_g': weightG,
     'edge_result': edgeResult,
     'image_path': imagePath,
+    'depth_path': depthPath,
+    'depth_meta_path': depthMetaPath,
   };
 
   factory MealRecordUpload.fromJson(Map<String, Object?> json) {
@@ -286,6 +295,8 @@ class MealRecordUpload {
           '',
       weightG: asDouble(json['weight_g']),
       edgeResult: edge is Map ? edge.cast<String, Object?>() : null,
+      depthPath: asString(json['depth_path']),
+      depthMetaPath: asString(json['depth_meta_path']),
     );
   }
 }

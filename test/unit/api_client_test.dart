@@ -63,6 +63,89 @@ void main() {
     expect(res.timestamp, 200);
   });
 
+  group('meal record upload', () {
+    late Directory tmp;
+    setUp(() => tmp = Directory.systemTemp.createTempSync('spoonfull_up'));
+    tearDown(() => tmp.deleteSync(recursive: true));
+
+    MealRecordUpload upload({String? depth, String? meta}) => MealRecordUpload(
+      imagePath: '${tmp.path}/a.jpg',
+      bedId: 'B1',
+      patientId: 'P1',
+      mealId: 'M1',
+      mealTimeSlot: 'T1',
+      beforeAfter: 'before',
+      captureTime: 1,
+      deviceId: 'D',
+      clientRecordId: 'c1',
+      depthPath: depth,
+      depthMetaPath: meta,
+    );
+
+    http.Response ok(http.Request req) => _json({
+      'success': true,
+      'data': {'record_id': '7', 'ai_status': 'pending'},
+    }, 200);
+
+    test('sends depth PNG and depth_meta alongside the image', () async {
+      File('${tmp.path}/a.jpg').writeAsBytesSync([0xFF, 0xD8, 1, 2]);
+      File('${tmp.path}/a_depth.png').writeAsBytesSync([0x89, 0x50, 3, 4]);
+      File('${tmp.path}/a_depth.json').writeAsStringSync('{"fx": 1.5}');
+      late http.Request captured;
+      final repo = HttpApiRepository(
+        _client((req) async {
+          captured = req;
+          return ok(req);
+        }),
+      );
+      final result = await repo.uploadMealRecord(
+        upload(
+          depth: '${tmp.path}/a_depth.png',
+          meta: '${tmp.path}/a_depth.json',
+        ),
+      );
+      expect(result.recordId, '7');
+      // 檔案內容不是 UTF-8,用 latin1 看 multipart 文字部分。
+      final body = latin1.decode(captured.bodyBytes);
+      expect(
+        captured.headers['content-type'],
+        startsWith('multipart/form-data'),
+      );
+      expect(body, contains('name="image"; filename="a.jpg"'));
+      expect(body, contains('name="depth"; filename="a_depth.png"'));
+      expect(body, contains('content-type: image/png'));
+      expect(body, contains('name="depth_meta"'));
+      expect(body, contains('{"fx": 1.5}'));
+      expect(body, contains('name="client_record_id"'));
+    });
+
+    test('uploads RGB only when there is no depth', () async {
+      File('${tmp.path}/a.jpg').writeAsBytesSync([0xFF, 0xD8, 1, 2]);
+      late http.Request captured;
+      final repo = HttpApiRepository(
+        _client((req) async {
+          captured = req;
+          return ok(req);
+        }),
+      );
+      await repo.uploadMealRecord(upload(depth: '${tmp.path}/missing.png'));
+      final body = latin1.decode(captured.bodyBytes);
+      expect(body, contains('name="image"'));
+      expect(body, isNot(contains('name="depth"')));
+      expect(body, isNot(contains('depth_meta')));
+    });
+
+    test('missing photo is a non-retryable local error', () async {
+      final repo = HttpApiRepository(_client((req) async => ok(req)));
+      await expectLater(
+        repo.uploadMealRecord(upload()),
+        throwsA(
+          isA<AppException>().having((e) => e.code, 'code', 'IMAGE_MISSING'),
+        ),
+      );
+    });
+  });
+
   group('device authorization flow', () {
     test('pair/start is sent without Authorization header', () async {
       late http.Request captured;

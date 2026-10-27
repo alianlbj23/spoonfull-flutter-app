@@ -1,4 +1,4 @@
-# 機台部署 (Jetson Orin Nano / Raspberry Pi 5)
+# 機台部署 (Raspberry Pi 5;Jetson Orin Nano 次要)
 
 對應 [ARCHITECTURE.md](../ARCHITECTURE.md) §5 與 §11 階段 5。機台只做採集:拍照、秤重、品質檢查、上傳,不跑任何 AI。
 
@@ -12,7 +12,16 @@ sudo ./deploy/install-device.sh --user <登入帳號> [--hx711]
 
 腳本會從 GitHub Release 下載 CI 編譯的最新版到 `/opt/spoonfull`(已經有 App 就不下載)。**一定要用 Release 的版本**:只有 CI 編譯的版本會自動更新(見 §5)。
 
-`install-device.sh` 還會:安裝 GStreamer / v4l-utils / libsecret、設定 udev 權限 (hidraw、ttyUSB、video)、開 NTP、安裝 `spoonfull-kiosk.service` (開機全螢幕啟動,`SPOONFULL_KIOSK=1`)。
+`install-device.sh` 還會:安裝 RealSense bridge 的 Python 相依 (numpy / OpenCV) 與 libsecret、設定 udev 權限 (RealSense USB、hidraw、ttyUSB)、開 NTP、放一份 `realsense_bridge.py` 到 `/opt/spoonfull`、安裝 `spoonfull-kiosk.service` (開機全螢幕啟動,`SPOONFULL_KIOSK=1`)。
+
+**相機 (RealSense D435f) 要先裝 librealsense + pyrealsense2**,Raspberry Pi 上沒有現成套件,先跑一次 (約 30–45 分鐘,一般使用者執行):
+
+```bash
+./deploy/build-librealsense.sh        # 編譯、安裝、裝 udev 規則,並用 cpack 產出 .deb
+rs-enumerate-devices                  # 接上 D435f (USB 3 埠) 後應列出相機
+```
+
+之後的機台把產出的 `librealsense2-*.deb` 帶過去 `sudo dpkg -i` 即可。Pi 5 要配 5 A 電源 (D435f 最高吃 700 mA)。
 
 機台要先有自動登入的桌面 session (Pi OS Desktop 預設有;Jetson 的 Ubuntu 在「設定 → 使用者」開自動登入)。服務啟動後 App 全螢幕、無標題列、隱藏游標。
 
@@ -38,15 +47,28 @@ sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
 
 | 項目 | App 設定 (設定 → 硬體設定) | 備註 |
 |---|---|---|
-| USB 相機 | 來源 **USB 相機 (V4L2)**,裝置 `/dev/video0` | `v4l2-ctl --list-devices` 查裝置;高解析度 USB 相機勾 **MJPEG** 比較快 |
-| Jetson CSI 相機 (IMX219 等) | 來源 **Jetson CSI 相機**,裝置填 sensor-id (`0`) | 用 JetPack 內建的 `nvarguscamerasrc` |
-| Pi CSI 相機 | 來源 **Pi CSI 相機 (libcamera)** | `sudo apt install rpicam-apps` |
+| RealSense D435f | 來源 **RealSense D435f (RGB-D)**,序號留空 (只接一台) | 接 **USB 3** 埠;「偵測相機」會顯示序號 / 韌體 / USB 版本,USB 2 會提示換埠。拍照同時輸出 RGB + 深度圖 (1280x720,mm,對齊) |
+| 沒有相機 (開發) | 來源 **選擇圖片** | 沒有深度圖 |
 | USB HID 秤 (Dymo / Stamps.com 類) | 類型 **USB HID 秤**,裝置 `/dev/hidraw0` | `ls -l /dev/hidraw*`;udev 規則已開放 plugdev 群組 |
 | 序列埠秤或 HX711 + Arduino/ESP32 | 類型 **序列埠 / HX711 (USB)**,裝置 `/dev/ttyUSB0`、鮑率 | 微控制器每行輸出 `ST,GS,  123.4 g` 或純數字即可 |
 | HX711 直接接 GPIO | 類型 **HX711 (GPIO bridge)**,`127.0.0.1:9100` | 跑 `hx711_bridge.py`,先 `--calibrate <已知重量>` |
 | 沒有秤 | 類型 **不使用秤** | 不送 `weight_g`,server 以菜單標準份量估算 |
 
-相機固定架在餐車上、餐盒放固定位置 (秤面就是放餐盒的位置),餐前餐後角度要一致。
+相機固定架在餐車上、餐盒放固定位置 (秤面就是放餐盒的位置),餐前餐後角度要一致。D435f 的深度在 **30 cm 以內不可靠**,相機到餐盒建議 40–60 cm;「測試拍照」會顯示深度有效比例與中央距離,拿來確認架設高度。
+
+### RealSense bridge
+
+App 不直接連結 librealsense,拍照時執行 `python3 realsense_bridge.py --once <rgb.jpg> <depth.png> <meta.json>` (逾時 20 秒會砍掉子行程)。bridge 的位置依序找:環境變數 `SPOONFULL_REALSENSE_BRIDGE` → App bundle 內 `data/flutter_assets/deploy/realsense_bridge.py` (隨自動更新) → 執行目錄的 `deploy/` → `/opt/spoonfull/realsense_bridge.py`。Python 執行檔可用 `SPOONFULL_PYTHON` 指定。
+
+手動測試:
+
+```bash
+python3 /opt/spoonfull/realsense_bridge.py --probe                          # 偵測:印 JSON,找不到回 2
+python3 /opt/spoonfull/realsense_bridge.py --once /tmp/a.jpg /tmp/a_depth.png /tmp/a.json
+python3 /opt/spoonfull/realsense_bridge.py --mock --once /tmp/a.jpg /tmp/a_depth.png /tmp/a.json   # 沒相機時的合成影像
+```
+
+結束碼:0 成功;1 pyrealsense2 沒裝或參數錯;2 找不到相機;3 擷取失敗 / 逾時。App 對應顯示「相機還沒設定好」/「找不到 RealSense 相機」/「相機沒有回應」。
 
 ### 空秤參考照
 
@@ -58,9 +80,9 @@ sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
 
 ## 4. 驗證
 
-1. 硬體設定頁:「測試拍照」→ 看到照片與品質指標;「即時讀數」→ 秤的數字會動,放上重物後穩定圖示變綠。
+1. 硬體設定頁:「偵測相機」→ 顯示 D435f 序號與 USB 3;「測試拍照」→ 看到照片、品質指標與「深度:有效 xx%,中央 yy cm」;「即時讀數」→ 秤的數字會動,放上重物後穩定圖示變綠。
 2. 走一次流程:選病房 → 床位 → 餐前 → 放餐盒 → 下一步。畫面顯示「拍照與秤重中」,接著確認頁左下角出現重量 (來源「秤」),右側選時段膳食 → 上傳。
-3. server 端確認 `FoodIntake` 有 `weight_g`、`client_record_id`、`captured_at`,`edge_result` 有 `quality_check`。
+3. server 端確認 `FoodIntake` 有 `weight_g`、`client_record_id`、`captured_at`,`edge_result` 有 `quality_check` 與 `depth_attached: true`,而且收到 `depth` (PNG) 與 `depth_meta` 兩個欄位。
 4. 拔網路線上傳一筆 → 顯示離線排隊;插回去自動送出,server 只會有一筆 (去重鍵 `client_record_id`)。
 
 ## 5. 自動更新
@@ -88,7 +110,10 @@ sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
 - **照片佔用空間**:已上傳的照片 14 天後自動刪除,紀錄 90 天後刪除;還沒上傳的不會動。調整在 `lib/config/app_constants.dart` 的 `synced*Retention`。
 
 - **App 啟動後配對狀態每次都消失**:kiosk 沒有 keyring,App 會自動改用 `~/.local/share/.../auth_token.json` (權限 600)。看 log 有 `using file storage` 即正常。
-- **相機第一張很暗**:自動曝光還沒收斂。硬體設定沒有暴露暖機張數,預設連拍 9 張取最後一張;若仍暗,補光燈常亮,或在 `CameraSettings.warmupFrames` 調大。
-- **`gst-launch-1.0` 找不到**:`sudo apt install gstreamer1.0-tools gstreamer1.0-plugins-good`。
+- **「找不到 RealSense 相機」**:`rs-enumerate-devices` 沒列出 → 換 USB 3 線 / 埠、確認電源夠 (5 A);有列出但 App 找不到 → 重新登入讓 plugdev 群組生效,或 `sudo udevadm trigger`。
+- **「這台機器的相機還沒設定好」**:`python3 -c "import pyrealsense2"` 失敗 → 跑 `deploy/build-librealsense.sh`;或 bridge 檔案不在 (看 log `realsense bridge not found`)。
+- **「相機沒有回應」**:bridge 超過 20 秒沒回。多半是 USB 2 連線 (「偵測相機」會顯示 USB 2.x) 或相機被另一個程序佔著 (`realsense-viewer` 還開著)。
+- **深度有效比例很低 / 中央距離 0**:相機太近 (< 30 cm) 或對著反光面;拉開到 40–60 cm。
+- **相機第一張很暗**:自動曝光還沒收斂。預設丟掉 15 張暖機影格再取;若仍暗,補光燈常亮,或在 `CameraSettings.warmupFrames` 調大。
 - **HID 秤讀不到**:`cat /dev/hidraw0 | xxd` 放東西上去應該會有資料;沒有資料多半是權限 (重新登入讓 plugdev 生效) 或裝置編號不是 0。
 - **時間不對**:`timedatectl status` 看 NTP 是否同步;`capture_time` 用機台時鐘。

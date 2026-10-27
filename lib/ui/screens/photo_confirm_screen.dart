@@ -48,6 +48,8 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
   MealData? _meal;
   String? _error;
   late String _imagePath;
+  String? _depthPath;
+  String? _depthMetaPath;
   DateTime? _capturedAt;
   late ImageQualityReport _quality;
   double? _weightG;
@@ -76,6 +78,8 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
 
   void _applyCapture(CaptureResult c) {
     _imagePath = c.imagePath;
+    _depthPath = c.depthPath;
+    _depthMetaPath = c.depthMetaPath;
     _capturedAt = c.capturedAt;
     _quality = c.quality;
     final w = c.weight;
@@ -191,6 +195,8 @@ class _PhotoConfirmScreenState extends State<PhotoConfirmScreen> {
         slot: _slot!,
         phase: widget.phase,
         imagePath: _imagePath,
+        depthPath: _depthPath,
+        depthMetaPath: _depthMetaPath,
         captureTime: _capturedAt,
         weightG: _weightG,
         weightSource: _weightSource,

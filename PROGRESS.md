@@ -1,6 +1,6 @@
 # 進度紀錄
 
-最後更新:2026-10-19
+最後更新:2026-10-27
 
 ## 已完成
 
@@ -11,59 +11,31 @@
 - 測試:[test/unit/validators_test.dart](test/unit/validators_test.dart) 新增正常路徑 (100.64.0.0、100.110.50.9、100.127.255.255) 與邊界外 (100.63.255.255、100.128.0.0 仍視為公開)。
 - 已知與此無關的測試失敗:`test/unit/update_test.dart` 的「newer build is downloaded…」在 Windows 上失敗 (檢查檔案執行位元,Windows 沒有權限模型),改動前就如此。
 
-## 進行中:相機改為 RealSense D435f (RGB-D)
+## 相機改為 RealSense D435f (RGB-D) — App 端已完成 (2026-10-27),待機台驗證
 
 ### 需求 (已確認)
 - 相機來源只保留兩種:**選擇圖片** (picker) 與 **RealSense D435f**。
 - 要同時擷取 **RGB 與深度** (RGB-D)。
-- 舊機台已存的 `auto` / `v4l2` / `nvargus` / `libcamera` 設定一律轉成 RealSense。
-- `folder` / `mock` 來源從 UI 移除。
+- 舊機台已存的 `auto` / `v4l2` / `nvargus` / `libcamera` / `folder` / `mock` 設定一律轉成 RealSense。
 
-### 建議做法 (已提出,待實作)
-- 取像走 librealsense 的 pyrealsense2,做一支 `deploy/realsense_bridge.py`,模式比照 [deploy/hx711_bridge.py](deploy/hx711_bridge.py)。
-- App 端新增 `CameraSource.realsense`,沿用 `GStreamerCameraService` 的「呼叫外部程序 + timeout + 檢查輸出檔」模式,呼叫 `realsense_bridge.py --once <rgb.jpg> <depth.png> <meta.json>`。
-- 輸出格式:RGB JPEG;深度 16-bit PNG (mm,對齊到 color、同解析度);meta.json 含 `fx, fy, ppx, ppy, depth_scale, serial`。
-- 不走 V4L2:UVC 只給未對齊的 Z16 原始幀,沒有內參與 depth_scale。
-- Bridge 提供 `--mock` 模式,沒有相機也能驗證串接。
+### 已做 (dev 分支,2026-10-27)
+- **bridge** [deploy/realsense_bridge.py](deploy/realsense_bridge.py):`--probe` 偵測 (JSON:序號 / 韌體 / USB 版本,找不到回 2);`--once RGB DEPTH META` 拍一組 RGB-D (暖機 15 張、對齊到 color、深度轉 mm 寫 16-bit PNG、meta 含內參與 `depth_unit_m`);USB 2 時自動降 fps;`--mock` 沒相機也能跑 (已在 PC 驗證輸出格式)。寫檔優先 OpenCV,沒有就用 Pillow。
+- **Dart**:
+  - `CameraSource` 只剩 `realsense` / `picker`;舊值 `parse()` 轉 RealSense,`device` 改存序號 (舊的 `/dev/video0` 等自動清掉);沒存過設定時 Linux 預設 RealSense、桌面預設選擇圖片。
+  - `RealSenseCameraService`:外部程序 + 逾時 + 檢查三個輸出檔 (PNG 表頭 16-bit 灰階、尺寸對 meta);結束碼 2 → `CAMERA_NOT_FOUND`、1 → `CAMERA_UNAVAILABLE`。bridge 位置:`SPOONFULL_REALSENSE_BRIDGE` → bundle 內 `data/flutter_assets/deploy/` (pubspec assets,隨自動更新) → `./deploy/` → `/opt/spoonfull/`。`SPOONFULL_REALSENSE_MOCK=1` 走 mock。
+  - `HardwareService.capture`:深度圖搬到 `<uuid>_depth.png` / `_depth.json`,算 `DepthStats` (有效比例、中央中位距離) 寫進 meta `stats`;RGB 若被縮放 (尺寸不符) 就丟掉深度並記 log。
+  - 上傳:multipart 多 `depth` (image/png) 與 `depth_meta` (JSON 字串),`edge_result.depth_attached`;深度檔不見只送 RGB。`ApiClient.postMultipart` 改成多檔。
+  - 本機:`meal_records` v4 加 `depth_path` / `depth_meta_path`;佇列 request_data 帶兩個路徑;`discardImage` / `purgeExpired` / 孤兒清理都連深度檔一起處理。
+  - 硬體設定頁:來源兩個選項、序號欄、「偵測相機」按鈕顯示摘要 (USB 2 會提示換埠);測試拍照對話框多一行深度統計。移除解析度 / MJPEG 選項。
+  - 測試:`test/unit/realsense_camera_test.dart` (成功 / 找不到相機 / 沒裝 / 逾時 / 缺檔 / 尺寸不符 / probe / 舊值遷移)、`capture_test.dart` RGB-D 群組 (搬檔、上傳欄位、佇列還原、丟棄、清理、參考照)、`api_client_test.dart` multipart 含 depth。全部 185 個測試通過 (Flutter 3.47.6)。
+- **部署**:[deploy/build-librealsense.sh](deploy/build-librealsense.sh) (Pi 5 原生編 librealsense v2.56.3 + pyrealsense2,裝 udev 規則,cpack 出 .deb);`install-device.sh` 改裝 numpy / OpenCV、檢查 pyrealsense2、放 bridge 到 `/opt/spoonfull`;udev 規則加 RealSense USB (8086:0bxx)。
+- 文件:README §1 / §2.2 / §4.6 (`depth`、`depth_meta` 欄位與範例) / §6、deploy/README §1 / §3 / §4 / §6、ARCHITECTURE §5.1。
 
-### 測試環境分工
-| 環境 | 用途 |
-|---|---|
-| WSL / PC | Dart 單元測試 (假 `ProcessRunner`)、bridge `--mock` |
-| Ubuntu x64 | `pip install pyrealsense2` 有 wheel,可快速驗證 |
-| Raspberry Pi 5 (目標機台) | 最終驗證與部署;librealsense 需從原始碼建 (`FORCE_RSUSB_BACKEND=ON`、`BUILD_PYTHON_BINDINGS=ON`) |
-| Jetson Orin Nano | 備用;App 與 bridge 程式碼相同,只有安裝步驟不同 |
-
-### 決定 (2026-10-19)
-- **目標機台是 Raspberry Pi 5**,直接在 Pi 5 上開發與測試 (VS Code Remote-SSH),用 `git clone` 搬專案,開發時先停 `spoonfull-kiosk` service。Jetson 不再是主要環境。
-- **librealsense 在 Pi 5 上原生編譯**,不做交叉編譯、不在主機用 Docker arm64 容器編。理由:一次性 30–45 分鐘,保證對上 Pi OS Bookworm 的 glibc 2.36 / Python 3.11;Intel apt repo 只有 x86_64,PyPI / piwheels 沒有 aarch64 的 pyrealsense2 wheel。
-- 編完用 `cpack` 做成 `.deb` 留著,之後的機台直接 `dpkg -i`,並納入 `install-device.sh`。
-- Pi 5 要配 5A 電源 (D435f 最高吃 700 mA),接 USB 3 埠。
-
-### Pi 5 環境準備步驟
-```bash
-# Flutter 建置相依 (README §1)
-sudo apt install clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev
-# librealsense + pyrealsense2
-sudo apt install libssl-dev libusb-1.0-0-dev libudev-dev python3-dev
-git clone https://github.com/IntelRealSense/librealsense && cd librealsense && mkdir build && cd build
-cmake .. -DFORCE_RSUSB_BACKEND=ON -DBUILD_PYTHON_BINDINGS=ON -DBUILD_EXAMPLES=OFF -DPYTHON_EXECUTABLE=$(which python3)
-make -j4 && sudo make install && cpack   # 產出 .deb 留給下一台
-rs-enumerate-devices                     # 看得到 D435f 就 OK
-```
-
-### 待決事項 (需要確認後才動工)
-1. **Server 契約**:`POST api/machine/records/` 目前只收 `image` 欄位 ([lib/data/api/api_repository.dart](lib/data/api/api_repository.dart))。建議新增 `depth` (image/png) 與 `depth_meta` (JSON);若 vision-worker 只認 depth CSV,格式要改。
-2. **離線佇列**:目前只存一張圖片路徑,加深度後佇列與本機清理要一起改。
-3. **新相依套件**:pyrealsense2 (只裝在機台,不進 pubspec),版本固定 2.55 系列。
-
-### 實作順序 (確認後)
-1. `CameraSource` enum 與舊值遷移
-2. `realsense_bridge.py` 與 `--mock`
-3. Dart `RealSenseCameraService` 與測試 (成功、timeout、輸出檔缺失、depth 尺寸不符)
-4. 硬體設定頁:來源只剩兩個選項,移除解析度 / MJPEG 選項
-5. 上傳新增深度欄位、離線佇列
-6. README、deploy/README、`install-device.sh` 加 librealsense 建置步驟 (以 Pi OS Bookworm 為主,Jetson 標為次要)
+### 待辦 (需要機台或 server)
+1. **Pi 5 實機驗證**:`build-librealsense.sh` 跑一次 (v2.56.3 若有 cmake 問題換 v2.55.1)、`rs-enumerate-devices`、`realsense_bridge.py --probe` / `--once`,再走 App 的「偵測相機」→「測試拍照」→ 上傳。注意 D435f 深度 < 30 cm 不可靠,架設 40–60 cm。
+2. **Server 契約**:`POST api/machine/records/` 要收 `depth` (16-bit PNG, mm) 與 `depth_meta` (JSON);舊 server 會忽略這兩個欄位不報錯。vision-worker 的體積估算改讀 PNG + `intrinsics` / `depth_unit_m` (不再是 depth CSV)。
+3. `tools/send_test_records.py` 還沒帶深度 (只送 RGB)。
+4. Jetson 若之後要用:程式相同,只有 pyrealsense2 安裝方式不同 (JetPack 可用 pip wheel 或同一支 build 腳本)。
 
 ## 其他筆記
 - 已加 `.gitattributes` 固定 `.cc` / `.h` / `.cmake` / `.swift` 為 LF;`flutter pub get` 重寫 generated plugin 檔案後不會再因 `core.autocrlf=true` 出現幻影修改。

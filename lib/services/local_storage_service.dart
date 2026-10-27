@@ -245,9 +245,17 @@ class LocalStorageService {
   }
 
   /// 所有紀錄指向的照片路徑 (清理孤兒照片時用來比對)。
+  /// 所有紀錄指向的檔案 (照片、深度圖、深度 meta),清理孤兒檔案時用。
   Future<Set<String>> recordImagePaths() async {
-    final rows = await _db.query('meal_records', columns: ['image_path']);
-    return {for (final r in rows) r['image_path'] as String};
+    final rows = await _db.query(
+      'meal_records',
+      columns: ['image_path', 'depth_path', 'depth_meta_path'],
+    );
+    return {
+      for (final r in rows)
+        for (final c in ['image_path', 'depth_path', 'depth_meta_path'])
+          if (r[c] case final String path) path,
+    };
   }
 
   Future<LocalMealRecord?> getRecord(String localId) async {

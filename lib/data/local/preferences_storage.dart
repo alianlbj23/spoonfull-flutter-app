@@ -115,13 +115,15 @@ class PreferencesStorage {
   /// 硬體設定 (相機 / 秤 / 參考照),以 JSON 保存。
   HardwareConfig readHardwareConfig() {
     final raw = _prefs.getString(_hardware);
-    if (raw == null) return const HardwareConfig();
+    // 沒存過設定:相機來源依平台 (Linux 機台 RealSense,桌面選擇圖片)。
+    final fresh = HardwareConfig(camera: CameraSettings.platformDefault());
+    if (raw == null) return fresh;
     try {
       return HardwareConfig.fromJson(
         (jsonDecode(raw) as Map).cast<String, Object?>(),
       );
     } catch (_) {
-      return const HardwareConfig();
+      return fresh;
     }
   }
 

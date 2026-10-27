@@ -31,8 +31,6 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
   late final TextEditingController _mockWeight;
   bool _saving = false;
 
-  static const _resolutions = [(640, 480), (1280, 720), (1920, 1080)];
-
   @override
   void initState() {
     super.initState();
@@ -118,6 +116,10 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
     );
     // 測試照片看完就刪,不留在照片資料夾。
     await state.discardTest();
+  });
+
+  Future<void> _probeCamera() => _applyThen(() async {
+    await context.read<HardwareState>().probeCamera();
   });
 
   Future<void> _captureReference() => _applyThen(() async {
@@ -231,47 +233,44 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
                             ],
                           ),
                           const SizedBox(height: 10),
-                          _Label(
-                            cam.source == CameraSource.folder
-                                ? '圖片資料夾 (相對於執行目錄或絕對路徑)'
-                                : '裝置 (V4L2 路徑 / CSI sensor-id)',
-                          ),
-                          PillField(
-                            fieldKey: const Key('camera-device'),
-                            controller: _cameraDevice,
-                            width: 440,
-                            height: 46,
-                            fontSize: 22,
-                            hint: cam.source == CameraSource.folder
-                                ? 'test_images'
-                                : '/dev/video0',
-                          ),
-                          const SizedBox(height: 10),
-                          _Label('擷取解析度'),
-                          Wrap(
-                            spacing: 6,
-                            children: [
-                              for (final (w, h) in _resolutions)
-                                OptionChip(
-                                  label: '${w}x$h',
-                                  selected: cam.width == w && cam.height == h,
-                                  onTap: () => setState(
-                                    () => _config = _config.copyWith(
-                                      camera: cam.copyWith(width: w, height: h),
-                                    ),
-                                  ),
+                          if (cam.source == CameraSource.realsense) ...[
+                            _Label('相機序號 (只接一台時留空)'),
+                            Row(
+                              children: [
+                                PillField(
+                                  fieldKey: const Key('camera-device'),
+                                  controller: _cameraDevice,
+                                  width: 280,
+                                  height: 46,
+                                  fontSize: 22,
+                                  hint: '自動',
                                 ),
-                              OptionChip(
-                                label: 'MJPEG',
-                                selected: cam.mjpeg,
-                                onTap: () => setState(
-                                  () => _config = _config.copyWith(
-                                    camera: cam.copyWith(mjpeg: !cam.mjpeg),
-                                  ),
+                                const SizedBox(width: 10),
+                                PrimaryButton(
+                                  key: const Key('probe-camera'),
+                                  label: '偵測相機',
+                                  width: 150,
+                                  height: 46,
+                                  fontSize: 22,
+                                  background: AppColors.periwinkle,
+                                  loading: state.busy,
+                                  onPressed: _probeCamera,
                                 ),
-                              ),
-                            ],
-                          ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              state.cameraInfo?.summary ??
+                                  '拍照時同時擷取 RGB 與深度圖 (1280x720,對齊到彩色影像),'
+                                      '兩者一起上傳。相機請接 USB 3 埠。',
+                              key: const Key('camera-info'),
+                              style: AppText.size(18, color: Colors.black87),
+                            ),
+                          ] else
+                            Text(
+                              '從檔案選擇照片,沒有深度圖 (開發與測試用)。',
+                              style: AppText.size(18, color: Colors.black87),
+                            ),
                           const SizedBox(height: 12),
                           Row(
                             children: [
@@ -645,6 +644,16 @@ class _TestCaptureDialog extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('尺寸 ${result.width}x${result.height}', style: style),
+                  Text(
+                    switch (result.depth) {
+                      null => '深度:無 (未使用 RealSense)',
+                      final d =>
+                        '深度:有效 ${(d.validRatio * 100).toStringAsFixed(0)}%'
+                            '${d.centerMedianMm == null ? '' : ',中央 ${(d.centerMedianMm! / 10).toStringAsFixed(1)} cm'}',
+                    },
+                    key: const Key('test-capture-depth'),
+                    style: style,
+                  ),
                   Text(
                     '平均亮度 ${q.meanLuma.toStringAsFixed(0)} / 255',
                     style: style,

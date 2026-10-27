@@ -13,7 +13,7 @@ class AppDatabase {
   /// v2:meal_records 新增 weight_g / weight_source / edge_result (ARCHITECTURE.md §6.4)。
   /// v3:meals 新增 assigned_patient_ids;meal_records 新增 server_flags
   /// (server 回的 bed_mismatch / assignment_mismatch)。
-  static const int _version = 3;
+  static const int _version = 4;
 
   /// Jetson / Raspberry Pi (Linux) 與其他桌面平台透過 FFI 使用 SQLite。
   static bool _factoryReady = false;
@@ -21,7 +21,8 @@ class AppDatabase {
   static void initFactory() {
     if (_factoryReady) return;
     _factoryReady = true;
-    if (!kIsWeb && (Platform.isLinux || Platform.isWindows || Platform.isMacOS)) {
+    if (!kIsWeb &&
+        (Platform.isLinux || Platform.isWindows || Platform.isMacOS)) {
       sqfliteFfiInit();
       databaseFactory = databaseFactoryFfi;
     }
@@ -29,8 +30,7 @@ class AppDatabase {
 
   static Future<AppDatabase> open({String? path}) async {
     initFactory();
-    final dbPath =
-        path ?? p.join(await getDatabasesPath(), 'spoonfull.db');
+    final dbPath = path ?? p.join(await getDatabasesPath(), 'spoonfull.db');
     final db = await openDatabase(
       dbPath,
       version: _version,
@@ -63,8 +63,17 @@ class AppDatabase {
       await db.execute('ALTER TABLE meal_records ADD COLUMN edge_result TEXT');
     }
     if (from < 3) {
-      await db.execute('ALTER TABLE meals ADD COLUMN assigned_patient_ids TEXT');
+      await db.execute(
+        'ALTER TABLE meals ADD COLUMN assigned_patient_ids TEXT',
+      );
       await db.execute('ALTER TABLE meal_records ADD COLUMN server_flags TEXT');
+    }
+    if (from < 4) {
+      // RealSense 深度圖 (RGB-D)
+      await db.execute('ALTER TABLE meal_records ADD COLUMN depth_path TEXT');
+      await db.execute(
+        'ALTER TABLE meal_records ADD COLUMN depth_meta_path TEXT',
+      );
     }
   }
 
@@ -123,6 +132,8 @@ class AppDatabase {
           meal_time_slot TEXT NOT NULL,
           before_after TEXT NOT NULL,
           image_path TEXT NOT NULL,
+          depth_path TEXT,
+          depth_meta_path TEXT,
           capture_time INTEGER NOT NULL,
           weight_g REAL,
           weight_source TEXT NOT NULL DEFAULT 'none',

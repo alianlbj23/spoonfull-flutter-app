@@ -23,10 +23,12 @@ flutter run -d windows
 flutter run -d windows --dart-define=USE_MOCK_API=true
 ```
 
-在 Windows / macOS 開發時,相機來源預設為「系統相機 / 選檔」(選一張圖片當照片),秤預設為「不使用秤」。到 **設定 → 硬體設定** 可改成:
+相機來源只有兩種(設定 → 硬體設定):
 
-- **測試圖片資料夾**:把餐盒照片放進 [test_images/](test_images/),每次「下一步」依檔名順序取下一張(循環)。接 RealSense 之前,用真實照片走完整個上傳流程就用這個。
-- **模擬相機** / **模擬秤**:不需要任何檔案或硬體,自動產生合成圖與假重量。
+- **RealSense D435f (RGB-D)**:機台用。Linux 上的預設值,拍照時同時擷取 RGB 與對齊的深度圖,兩者一起上傳。App 透過 [deploy/realsense_bridge.py](deploy/realsense_bridge.py)(pyrealsense2)取像,安裝見 [deploy/README.md](deploy/README.md) §3。
+- **選擇圖片**:Windows / macOS 開發時的預設值,選一張圖片當照片,沒有深度圖。
+
+沒有相機時要測 RGB-D 串接:環境變數 `SPOONFULL_REALSENSE_MOCK=1` 讓 bridge 產生合成餐盒 RGB-D(需要 `python3` + numpy + OpenCV 或 Pillow);Dart 測試用 `MockCameraService(withDepth: true)`。秤預設為「不使用秤」,可改 **模擬秤**。
 
 不經 App、直接用 `test_images/` 的照片加假資料打 server(配對 → 同步 → 上傳 → 去重),用 [tools/send_test_records.py](tools/send_test_records.py),全部互動選單、不用記參數:
 
@@ -36,7 +38,7 @@ python tools/send_test_records.py
 
 配對流程與 App 相同:印出配對碼 → 請 Super Admin 到管理後台核准 → 輪詢拿 token。
 
-**Linux 機台建置相依**:`clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev`;執行期需要 `gstreamer1.0-tools gstreamer1.0-plugins-good v4l-utils`。開機自動全螢幕 (kiosk) 的安裝步驟見 [deploy/README.md](deploy/README.md)。
+**Linux 機台建置相依**:`clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev`;執行期需要 `python3 python3-numpy python3-opencv` 與 librealsense / pyrealsense2(Raspberry Pi 要自己編,見 [deploy/build-librealsense.sh](deploy/build-librealsense.sh))。開機自動全螢幕 (kiosk) 的安裝步驟見 [deploy/README.md](deploy/README.md)。
 
 | dart-define | 值 | 說明 |
 |---|---|---|
@@ -119,8 +121,8 @@ main()
 
 **拍照 + 秤重**(第一次使用前先到「設定 → 硬體設定」選相機與秤,詳見 [deploy/README.md](deploy/README.md)):
 
-1. 相機擷取一張原始照片(Linux 用 GStreamer `v4l2src` / `nvarguscamerasrc` 或 `rpicam-still`;Android/iOS 用系統相機;桌面開發用選檔),同時讀秤直到讀數穩定(連續 5 筆差距 ≤ 2 g,或秤自己回報穩定;最多等 6 秒)。
-2. 照片縮到**長邊 1280、JPEG 品質 80**,並做純 CPU 品質檢查:過暗、過亮、模糊(Laplacian 變異數)、餐盒不在畫面(與「空秤參考照」比對,沒有參考照則看畫面中央邊緣密度與對比)。不通過時提示重拍,也可選「仍要使用」。
+1. RealSense D435f 擷取一組 RGB-D(`realsense_bridge.py --once`:RGB JPEG 1280x720 + 對齊到彩色的 16-bit 深度 PNG,單位 mm + meta JSON 含內參、序號;開發時可選擇圖片檔案,沒有深度),同時讀秤直到讀數穩定(連續 5 筆差距 ≤ 2 g,或秤自己回報穩定;最多等 6 秒)。
+2. 照片縮到**長邊 1280、JPEG 品質 80**(1280x720 不會縮,深度圖與照片逐像素對齊),並做純 CPU 品質檢查:過暗、過亮、模糊(Laplacian 變異數)、餐盒不在畫面(與「空秤參考照」比對,沒有參考照則看畫面中央邊緣密度與對比)。深度圖另外統計有效像素比例與中央距離,寫進 meta 的 `stats`。不通過時提示重拍,也可選「仍要使用」。
 3. 確認畫面左下顯示重量與來源(秤 / 手動),可「重新秤重」或「手動輸入」;沒有秤時不送重量。
 
 **BASE_URL 組法**([server_address.dart](lib/core/utils/server_address.dart) `ServerAddress.resolve`,設定畫面在位址欄下方即時顯示「將連線到 …」):
@@ -358,6 +360,8 @@ main()
 | 欄位 | 型別 | 說明 |
 |---|---|---|
 | `image` | 檔案 | JPEG 或 PNG;檔名為 `{uuid}.jpg` 或 `{uuid}.png`;part 的 Content-Type 為 `image/jpeg` 或 `image/png` |
+| `depth` | 檔案 | **選填**(RealSense 拍的才有)。16-bit 灰階 PNG,**單位 mm,0 = 沒有資料**,已對齊到 `image` 且同解析度(1280x720,逐像素對應);檔名 `{uuid}_depth.png`,Content-Type `image/png` |
+| `depth_meta` | 文字(JSON) | 與 `depth` 一起出現。`realsense_bridge.py` 的 meta:`serial`、`width`、`height`、`depth_unit_m`(0.001:PNG 值 × 此值 = 公尺)、`intrinsics` (`fx` `fy` `ppx` `ppy` `model` `coeffs`,彩色相機內參,深度已對齊到它)、`captured_at`、`stats` (`valid_ratio`、`center_median_mm`)。vision-worker 做體積估算要用內參與 `depth_unit_m` |
 | `bed_id` | 文字 | 來自 bed_data |
 | `patient_id` | 文字 | 拍照當時這張床的病患 |
 | `meal_id` | 文字 | 來自 meal_data |
@@ -367,7 +371,7 @@ main()
 | `device_id` | 文字 | 與配對時相同,可用來比對 token |
 | `client_record_id` | 文字 | **一定會帶**。App 本機紀錄的 UUID,**去重鍵**:同一 `client_record_id` 再送一次 → 回原本的 `record_id`,不新增 |
 | `weight_g` | 文字(數字,1 位小數) | 整盤重量(公克),餐前餐後各一次,**容器重量在餐前−餐後相減時自動抵消**。沒有秤或沒讀到時**不帶此欄位**,server 以菜單標準份量估算並標記 `weight_source=estimated` |
-| `edge_result` | 文字(JSON) | 選填,機台端即時檢查結果(ARCHITECTURE.md §6.5 預留欄位)。目前內容為 `{"quality_check": {...}, "weight_source": "scale" 或 "manual"}`,server 只存不處理 |
+| `edge_result` | 文字(JSON) | 選填,機台端即時檢查結果(ARCHITECTURE.md §6.5 預留欄位)。目前內容為 `{"quality_check": {...}, "weight_source": "scale" 或 "manual", "depth_attached": true/false}`,server 只存不處理 |
 
 `edge_result.quality_check` 範例:
 
@@ -378,6 +382,18 @@ main()
 ```
 
 `issues` 可能的值:`tooDark`、`tooBright`、`blurry`、`trayMissing`(使用者選了「仍要使用」才會帶著問題上傳)。
+
+`depth_meta` 範例(節錄):
+
+```json
+{ "format": "spoonfull-rgbd/1", "serial": "123456789012", "name": "Intel RealSense D435f",
+  "width": 1280, "height": 720, "depth_unit_m": 0.001, "depth_aligned_to": "color",
+  "intrinsics": { "fx": 910.2, "fy": 909.8, "ppx": 641.5, "ppy": 361.2, "model": "inverse_brown_conrady", "coeffs": [0,0,0,0,0] },
+  "captured_at": "2026-10-27T03:21:07.512+00:00",
+  "stats": { "width": 1280, "height": 720, "valid_ratio": 0.97, "center_median_mm": 548 } }
+```
+
+舊版接收器可以忽略 `depth` / `depth_meta`(Django 的 `request.FILES` / `request.POST` 多出來的欄位不會報錯);照片仍是唯一必要的檔案欄位,機台找不到深度檔時只送 RGB。
 
 機台送出前已檢查過的限制(接收器仍應自行檢查):
 
@@ -576,7 +592,8 @@ curl -X POST http://localhost:8080/api/machine/records/ \
 | 每個 API 送什麼、讀什麼 | [lib/data/api/api_repository.dart](lib/data/api/api_repository.dart)、[lib/data/models/](lib/data/models/) |
 | 假資料(可當作回應範本) | [lib/data/api/mock_api_repository.dart](lib/data/api/mock_api_repository.dart) |
 | 配對 / token | [lib/services/device_pairing_service.dart](lib/services/device_pairing_service.dart);Linux 無 keyring 時退回檔案儲存:[lib/data/local/secure_token_storage.dart](lib/data/local/secure_token_storage.dart) |
-| 相機擷取 (GStreamer / rpicam / image_picker / 模擬) | [lib/services/hardware/camera_service.dart](lib/services/hardware/camera_service.dart) |
+| 相機擷取 (RealSense bridge / image_picker / 模擬)、深度圖檔名慣例 | [lib/services/hardware/camera_service.dart](lib/services/hardware/camera_service.dart)、[deploy/realsense_bridge.py](deploy/realsense_bridge.py) |
+| 深度圖統計 (有效比例、中央距離)、PNG 表頭檢查 | [lib/services/hardware/depth_image.dart](lib/services/hardware/depth_image.dart) |
 | 秤 (USB HID / 序列埠 / HX711 bridge / 模擬)、穩定判斷 | [lib/services/hardware/scale_service.dart](lib/services/hardware/scale_service.dart) |
 | 壓縮 (1280 / q80) 與品質檢查 | [lib/services/hardware/image_pipeline.dart](lib/services/hardware/image_pipeline.dart)、[lib/core/utils/image_quality_analyzer.dart](lib/core/utils/image_quality_analyzer.dart) |
 | 拍照 + 秤重流程、空秤參考照 | [lib/services/hardware/hardware_service.dart](lib/services/hardware/hardware_service.dart)、[lib/ui/screens/capture_flow.dart](lib/ui/screens/capture_flow.dart) |

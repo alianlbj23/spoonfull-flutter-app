@@ -100,11 +100,18 @@ class AppConstants {
   static const int uploadMaxLongSide = 1280;
   static const int uploadJpegQuality = 80;
 
-  // --- 相機擷取 (預設解析度與暖機張數;USB 相機前幾張常曝光不足) ---
+  // --- 相機擷取 (RealSense D435f,deploy/realsense_bridge.py) ---
+  /// 擷取解析度。深度最高 1280x720,與 [uploadMaxLongSide] 相同,
+  /// 所以 RGB 不會再縮放,深度圖與上傳的照片逐像素對齊。
   static const int captureWidth = 1280;
   static const int captureHeight = 720;
-  static const int captureWarmupFrames = 8;
+
+  /// 擷取前丟掉的暖機影格數 (自動曝光收斂;30 fps 下約半秒)。
+  static const int captureWarmupFrames = 15;
   static const Duration captureTimeout = Duration(seconds: 20);
+
+  /// 偵測相機 (`--probe`) 的逾時。
+  static const Duration cameraProbeTimeout = Duration(seconds: 10);
 
   // --- 拍照品質檢查 (純 CPU,ARCHITECTURE.md §5.1) ---
   /// 分析前先縮到此寬度,門檻皆以此尺度校正。

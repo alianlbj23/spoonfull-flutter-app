@@ -8,7 +8,9 @@ import 'package:image/image.dart' as img;
 import '../../config/app_constants.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/utils/image_quality_analyzer.dart';
+import '../../core/utils/logger.dart';
 import '../../data/models/image_quality.dart';
+import 'depth_image.dart';
 
 /// 處理後的照片:已縮放、重新編碼為 JPEG,並附品質檢查結果。
 class ProcessedCapture {
@@ -89,6 +91,21 @@ class ImagePipeline {
       height: result.height,
       quality: result.quality,
     );
+  }
+
+  /// 深度圖統計 (有效像素比例、中央距離);讀不到或不是 PNG 時回 null。
+  Future<DepthStats?> analyzeDepth(String path) async {
+    final file = File(path);
+    if (!await file.exists()) return null;
+    final bytes = await file.readAsBytes();
+    try {
+      return useIsolate
+          ? await Isolate.run(() => DepthStats.analyze(bytes))
+          : DepthStats.analyze(bytes);
+    } on Object catch (e) {
+      Log.i('depth analyze failed: $e');
+      return null;
+    }
   }
 
   /// 純函式:縮放、編碼並分析。可在任何 isolate 執行。

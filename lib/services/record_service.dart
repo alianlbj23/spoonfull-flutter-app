@@ -57,10 +57,12 @@ class RecordService {
   /// 重新秤重 (不重拍)。
   Future<WeightReading?> readWeight() => _hardware.readWeight();
 
+  /// 刪掉沒要用的照片 (取消、重拍) 連同它的深度圖與 meta。
   Future<void> discardImage(String path) async {
     try {
       await File(path).delete();
     } catch (_) {}
+    await HardwareService.discardDepthFor(path);
   }
 
   /// 建立紀錄並嘗試上傳。在線 → 立即上傳;離線或暫時性錯誤 → 加入離線佇列。
@@ -73,6 +75,8 @@ class RecordService {
     required MealPhase phase,
     required String imagePath,
     required String deviceId,
+    String? depthPath,
+    String? depthMetaPath,
     DateTime? captureTime,
     double? weightG,
     WeightSource weightSource = WeightSource.none,
@@ -80,6 +84,12 @@ class RecordService {
   }) async {
     // 1. 本機驗證 — 失敗直接丟出,不加入佇列
     await Validators.image(imagePath);
+    // 深度圖不見了 (例如被清掉) 就只送 RGB,不要讓整筆紀錄卡住。
+    if (depthPath != null && !await File(depthPath).exists()) {
+      Log.i('depth file missing, uploading RGB only: $depthPath');
+      depthPath = null;
+      depthMetaPath = null;
+    }
     Validators.bedAndPatient(bed: bed, roomBeds: roomBeds);
     Validators.meal(meal.mealId, meals);
     Validators.weight(weightG);
@@ -94,6 +104,8 @@ class RecordService {
       mealTimeSlot: timeSlot.timeSlotId,
       beforeAfter: phase,
       imagePath: imagePath,
+      depthPath: depthPath,
+      depthMetaPath: depthMetaPath,
       captureTime: captureTime == null ? now : toUnix(captureTime),
       weightG: weightG,
       weightSource: weightG == null ? WeightSource.none : weightSource,
@@ -189,11 +201,15 @@ class RecordService {
         deviceId: deviceId,
         clientRecordId: r.localId,
         weightG: r.weightG,
+        depthPath: r.depthPath,
+        depthMetaPath: r.depthMetaPath,
         edgeResult: r.quality == null
             ? null
             : {
                 'quality_check': r.quality!.toJson(),
                 'weight_source': r.weightSource.name,
+                // 有深度圖時 multipart 多帶 depth / depth_meta 兩個欄位。
+                'depth_attached': r.depthPath != null,
               },
       );
 
@@ -324,6 +340,9 @@ class RecordService {
     );
     for (final r in expired) {
       await remove(File(r.imagePath));
+      for (final path in [r.depthPath, r.depthMetaPath]) {
+        if (path != null) await remove(File(path));
+      }
       if (r.updatedAt < recordCutoff) await _storage.deleteRecord(r.localId);
     }
 

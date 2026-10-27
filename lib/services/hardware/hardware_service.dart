@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -13,6 +14,7 @@ import '../../data/models/image_quality.dart';
 import '../../data/models/weight_reading.dart';
 import '../local_storage_service.dart';
 import 'camera_service.dart';
+import 'depth_image.dart';
 import 'image_pipeline.dart';
 import 'scale_service.dart';
 
@@ -30,6 +32,9 @@ class CaptureResult {
     required this.width,
     required this.height,
     required this.quality,
+    this.depthPath,
+    this.depthMetaPath,
+    this.depth,
     this.weight,
     this.weightError,
     this.capturedAt,
@@ -39,6 +44,16 @@ class CaptureResult {
   final int width;
   final int height;
   final ImageQualityReport quality;
+
+  /// RealSense 的深度圖 (16-bit PNG, mm, 與 [imagePath] 逐像素對齊) 與 meta;
+  /// 選擇圖片時為 null。
+  final String? depthPath;
+  final String? depthMetaPath;
+
+  /// 深度圖統計 (有深度圖時)。
+  final DepthStats? depth;
+
+  bool get hasDepth => depthPath != null;
 
   /// 秤的穩定讀數;沒有秤或逾時沒讀到時為 null。
   final WeightReading? weight;
@@ -94,18 +109,14 @@ class HardwareService {
   /// 設定的相機能真的拍照;桌面平台的 picker 只能選檔,這時不必提供兩種選擇。
   bool get cameraAvailable {
     final cam = camera;
-    final available = cam is! ImagePickerCameraService || cam.opensCamera;
-    // 自動偵測沒找到相機 (例如開機時 USB 相機還沒接好):不要記住這個結果,
-    // 下次再偵測一次,相機接上後「拍照」按鈕才會回來。
-    if (!available) _forgetDetectedCamera();
-    return available;
+    return cam is! ImagePickerCameraService || cam.opensCamera;
   }
 
-  /// 相機來源是「自動」時丟掉偵測結果,下次使用時重新偵測。
-  void _forgetDetectedCamera() {
-    if (_fixedCamera == null && config.camera.source == CameraSource.auto) {
-      _camera = null;
-    }
+  /// 偵測 RealSense 相機 (硬體設定頁)。相機來源不是 RealSense 時回 null。
+  Future<RealSenseInfo?> probeCamera() async {
+    final cam = camera;
+    if (cam is! RealSenseCameraService) return null;
+    return cam.probe();
   }
 
   ScaleService get scale => _scale ??= ScaleService(
@@ -146,41 +157,120 @@ class HardwareService {
 
     final target = await _newImagePath();
     final source = method == CaptureMethod.file ? filePicker : camera;
-    final String? rawPath;
+    final RawCapture? raw;
     try {
-      rawPath = await source.capture('$target.raw');
+      raw = await source.capture('$target.raw');
     } on Object {
-      // 仍等秤結束,避免裝置握把未釋放;相機可能被拔掉或換了裝置,下次重新偵測。
+      // 仍等秤結束,避免裝置握把未釋放。
       await weightFuture;
-      if (method == CaptureMethod.camera) _forgetDetectedCamera();
       rethrow;
     }
-    if (rawPath == null) {
+    if (raw == null) {
       // 使用者取消:仍等秤結束,避免裝置握把未釋放。
       await weightFuture;
       return null;
     }
     // 快門時間:擷取完成的那一刻,不是之後壓縮、品質檢查或使用者按上傳的時間。
     final capturedAt = DateTime.now();
-    final processed = await _pipeline.process(
-      sourcePath: rawPath,
-      outputPath: target,
-      referencePath: config.referenceImagePath,
-    );
+    final ProcessedCapture processed;
+    try {
+      processed = await _pipeline.process(
+        sourcePath: raw.imagePath,
+        outputPath: target,
+        referencePath: config.referenceImagePath,
+      );
+    } on Object {
+      await _discardDepth(raw);
+      await weightFuture;
+      rethrow;
+    }
+    final depth = await _keepDepth(raw, processed);
     final weight = await weightFuture;
     Log.i(
       'captured ${processed.path} ${processed.width}x${processed.height} '
-      '${processed.quality} weight=${weight.reading}',
+      '${processed.quality} depth=${depth?.stats} weight=${weight.reading}',
     );
     return CaptureResult(
       imagePath: processed.path,
       width: processed.width,
       height: processed.height,
       quality: processed.quality,
+      depthPath: depth?.path,
+      depthMetaPath: depth?.metaPath,
+      depth: depth?.stats,
       weight: weight.reading,
       weightError: weight.error,
       capturedAt: capturedAt,
     );
+  }
+
+  /// 深度圖搬到正式照片旁邊 (`<uuid>_depth.png` / `_depth.json`),並把統計寫進 meta。
+  /// RGB 經 pipeline 縮放過 (尺寸與深度圖不同) 時深度就對不上,丟掉並記 log。
+  Future<_KeptDepth?> _keepDepth(RawCapture raw, ProcessedCapture rgb) async {
+    final rawDepth = raw.depthPath, rawMeta = raw.depthMetaPath;
+    if (rawDepth == null || rawMeta == null) return null;
+    final depthPath = RealSenseCameraService.depthPathFor(rgb.path);
+    final metaPath = RealSenseCameraService.depthMetaPathFor(rgb.path);
+    try {
+      await _move(File(rawDepth), depthPath);
+      await _move(File(rawMeta), metaPath);
+      final stats = await _pipeline.analyzeDepth(depthPath);
+      if (stats == null ||
+          stats.width != rgb.width ||
+          stats.height != rgb.height) {
+        Log.e(
+          'depth dropped',
+          'depth ${stats?.width}x${stats?.height} != photo '
+              '${rgb.width}x${rgb.height} (capture resolution too large?)',
+        );
+        await discardDepthFor(rgb.path);
+        return null;
+      }
+      // meta 加上統計,上傳時整個檔案當 depth_meta 送出。
+      final metaFile = File(metaPath);
+      final meta = (jsonDecode(await metaFile.readAsString()) as Map)
+          .cast<String, Object?>();
+      meta['stats'] = stats.toJson();
+      await metaFile.writeAsString(jsonEncode(meta), flush: true);
+      return _KeptDepth(depthPath, metaPath, stats);
+    } on Object catch (e) {
+      Log.e('depth dropped', e);
+      await _discardDepth(raw);
+      await discardDepthFor(rgb.path);
+      return null;
+    }
+  }
+
+  static Future<void> _move(File from, String to) async {
+    await File(to).parent.create(recursive: true);
+    try {
+      await from.rename(to);
+    } on FileSystemException {
+      // 跨檔案系統時 rename 會失敗,改用複製。
+      await from.copy(to);
+      await from.delete();
+    }
+  }
+
+  Future<void> _discardDepth(RawCapture raw) async {
+    for (final path in [raw.depthPath, raw.depthMetaPath]) {
+      if (path == null) continue;
+      try {
+        await File(path).delete();
+      } catch (_) {}
+    }
+  }
+
+  /// 刪掉照片對應的深度圖與 meta (照片本身由呼叫端處理)。
+  static Future<void> discardDepthFor(String imagePath) async {
+    for (final path in [
+      RealSenseCameraService.depthPathFor(imagePath),
+      RealSenseCameraService.depthMetaPathFor(imagePath),
+    ]) {
+      try {
+        await File(path).delete();
+      } catch (_) {}
+    }
   }
 
   Future<_WeightOutcome> _readWeightSafely() async {
@@ -213,12 +303,14 @@ class HardwareService {
     final dir = Directory(p.join((await _documentsDir()).path, 'reference'));
     await dir.create(recursive: true);
     final target = p.join(dir.path, 'empty_scale.jpg');
-    final rawPath = await camera.capture('$target.raw');
-    if (rawPath == null) {
+    final raw = await camera.capture('$target.raw');
+    if (raw == null) {
       throw const AppException(AppErrorType.localValidation, '已取消拍攝');
     }
+    // 參考照只比對 RGB,深度不需要。
+    await _discardDepth(raw);
     final processed = await _pipeline.process(
-      sourcePath: rawPath,
+      sourcePath: raw.imagePath,
       outputPath: target,
     );
     await apply(config.copyWith(referenceImagePath: processed.path));
@@ -241,6 +333,13 @@ class HardwareService {
   Future<void> dispose() async {
     await _camera?.dispose();
   }
+}
+
+class _KeptDepth {
+  const _KeptDepth(this.path, this.metaPath, this.stats);
+  final String path;
+  final String metaPath;
+  final DepthStats stats;
 }
 
 class _WeightOutcome {

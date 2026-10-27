@@ -45,6 +45,8 @@ class LocalMealRecord {
     required this.mealTimeSlot,
     required this.beforeAfter,
     required this.imagePath,
+    this.depthPath,
+    this.depthMetaPath,
     required this.captureTime,
     this.weightG,
     this.weightSource = WeightSource.none,
@@ -75,6 +77,10 @@ class LocalMealRecord {
   final String mealTimeSlot;
   final MealPhase beforeAfter;
   final String imagePath;
+
+  /// RealSense 深度圖 (16-bit PNG, mm) 與 meta JSON;選擇圖片的紀錄為 null。
+  final String? depthPath;
+  final String? depthMetaPath;
   final int captureTime;
 
   /// 整盤重量 (公克),餐前餐後各一次;沒有秤時為 null。
@@ -122,6 +128,8 @@ class LocalMealRecord {
       mealTimeSlot: mealTimeSlot,
       beforeAfter: beforeAfter,
       imagePath: imagePath,
+      depthPath: depthPath,
+      depthMetaPath: depthMetaPath,
       captureTime: captureTime,
       weightG: clearWeight ? null : (weightG ?? this.weightG),
       weightSource: clearWeight
@@ -152,6 +160,8 @@ class LocalMealRecord {
       mealTimeSlot: row['meal_time_slot'] as String,
       beforeAfter: MealPhase.parse(row['before_after'] as String?),
       imagePath: row['image_path'] as String,
+      depthPath: row['depth_path'] as String?,
+      depthMetaPath: row['depth_meta_path'] as String?,
       captureTime: row['capture_time'] as int,
       weightG: (row['weight_g'] as num?)?.toDouble(),
       weightSource: WeightSource.parse(row['weight_source'] as String?),
@@ -184,6 +194,8 @@ class LocalMealRecord {
     'meal_time_slot': mealTimeSlot,
     'before_after': beforeAfter.name,
     'image_path': imagePath,
+    'depth_path': depthPath,
+    'depth_meta_path': depthMetaPath,
     'capture_time': captureTime,
     'weight_g': weightG,
     'weight_source': weightSource.name,

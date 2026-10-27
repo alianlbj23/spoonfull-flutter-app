@@ -73,7 +73,7 @@
 | 選病房 → 床位 → 菜色 → 餐前／餐後 → 拍照 → 上傳 | 已有 | |
 | 離線佇列、重試（1s → 5s → 30s → 5m，之後每 30m 直到成功） | 已有 | 以錯誤信封的 `retryable` 為準；舊版 server 沒給時只有 4xx 錯誤信封（408 / 429 除外）不重試，代理回的 HTML 一律重試；遵守 `Retry-After`，見 §6.3 與 README §3.3 |
 | 配對、token 儲存 | 已有 | Device Authorization Flow：機台顯示配對碼，管理員在網頁核准，機台輪詢拿 token（README §4.1）。Linux kiosk 沒有 keyring 時自動改用檔案儲存（權限 600） |
-| 相機擷取 | 已有 | `image_picker` 在 Linux 不支援相機，改用 GStreamer / V4L2、`rpicam-still` |
+| 相機擷取 (RGB-D) | 已有 | Intel RealSense D435f：`deploy/realsense_bridge.py`（pyrealsense2）輸出 RGB JPEG + 對齊深度 16-bit PNG（mm）+ meta（內參、序號），上傳欄位 `depth` / `depth_meta`。開發用「選擇圖片」（無深度） |
 | 秤重 | 已有 | 自動讀取秤的數值（USB HID 秤、序列埠秤或 HX711 load cell），餐前餐後各一次，隨照片上傳 |
 | 拍照品質檢查 | 已有 | 純 CPU：過暗、過亮、模糊（Laplacian 變異數）、餐盒不在畫面 → 提示重拍 |
 | 壓縮 | 已有 | 長邊 1280、JPEG 品質 80 |
