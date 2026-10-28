@@ -63,13 +63,13 @@ class MockApiRepository implements ApiRepository {
       (_) => '0123456789abcdef'[_random.nextInt(16)],
     ).join();
     _polls[deviceCode] = 0;
-    String part() => List.generate(
-      4,
+    final pairingCode = List.generate(
+      8,
       (_) => 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'[_random.nextInt(31)],
     ).join();
     return PairingStart(
       deviceCode: deviceCode,
-      pairingCode: '${part()}-${part()}',
+      pairingCode: pairingCode,
       expiresIn: 600,
       interval: 5,
     );

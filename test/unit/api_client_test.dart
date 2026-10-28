@@ -156,7 +156,7 @@ void main() {
             'success': true,
             'data': {
               'device_code': 'c' * 64,
-              'pairing_code': 'K7QM-42XP',
+              'pairing_code': 'K7QM42XP',
               'expires_in': 600,
               'interval': 5,
             },
@@ -172,7 +172,7 @@ void main() {
         'app_version': 'dev',
       });
       expect(r.deviceCode, 'c' * 64);
-      expect(r.pairingCode, 'K7QM-42XP');
+      expect(r.pairingCode, 'K7QM42XP');
       expect(r.expiresIn, 600);
       expect(r.interval, 5);
     });

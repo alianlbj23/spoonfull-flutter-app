@@ -115,7 +115,7 @@ void main() {
     final code = tester
         .widget<Text>(find.byKey(const Key('pairing-code')))
         .data!;
-    expect(code, matches(RegExp(r'^[A-Z0-9]{4}-[A-Z0-9]{4}$')));
+    expect(code, matches(RegExp(r'^[A-Z0-9]{8}$')));
     expect(find.text('請到管理後台「機台管理」輸入:$code'), findsOneWidget);
     expect(find.textContaining('配對碼有效時間 09:'), findsOneWidget);
     expect(find.text('等待管理員核准…'), findsOneWidget);

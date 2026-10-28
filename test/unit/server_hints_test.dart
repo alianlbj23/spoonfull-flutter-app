@@ -200,7 +200,7 @@ void main() {
       api.pendingFirst = 1;
       await device.startPairing();
       expect(device.status, PairingStatus.pairing);
-      expect(device.pairingCode, matches(RegExp(r'^[A-Z0-9]{4}-[A-Z0-9]{4}$')));
+      expect(device.pairingCode, matches(RegExp(r'^[A-Z0-9]{8}$')));
       expect(device.pairingTimeLeft(), isNotNull);
       expect(device.pairingRetryIn()!.inSeconds, inInclusiveRange(3, 5));
       expect(api.startCalls, 1);

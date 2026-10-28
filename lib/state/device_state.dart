@@ -38,7 +38,7 @@ class DeviceState extends ChangeNotifier {
   /// 管理員拒絕了這次配對:不自動重試,等使用者按「重新取得配對碼」。
   bool pairingDenied = false;
 
-  /// 顯示給管理員輸入的配對碼 (例如 `K7QM-42XP`);還沒取得或已結束為 null。
+  /// 顯示給管理員輸入的配對碼 (例如 `K7QM42XP`);還沒取得或已結束為 null。
   String? pairingCode;
 
   /// 配對碼到期時間;到期後 server 會回 EXPIRED,機台自動換新碼。
