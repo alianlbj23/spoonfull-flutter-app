@@ -23,22 +23,45 @@ flutter run -d windows
 flutter run -d windows --dart-define=USE_MOCK_API=true
 ```
 
-相機來源只有兩種(設定 → 硬體設定):
+### 在開發電腦上跑起來
 
-- **RealSense D435f (RGB-D)**:機台用。Linux 上的預設值,拍照時同時擷取 RGB 與對齊的深度圖,兩者一起上傳。App 透過 [deploy/realsense_bridge.py](deploy/realsense_bridge.py)(pyrealsense2)取像,安裝見 [deploy/README.md](deploy/README.md) §3。
-- **選擇圖片**:Windows / macOS 開發時的預設值,選一張圖片當照片,沒有深度圖。
+**Ubuntu / Linux (x86_64)**
 
-沒有相機時要測 RGB-D 串接:環境變數 `SPOONFULL_REALSENSE_MOCK=1` 讓 bridge 產生合成餐盒 RGB-D(需要 `python3` + numpy + OpenCV 或 Pillow);Dart 測試用 `MockCameraService(withDepth: true)`。秤預設為「不使用秤」,可改 **模擬秤**。
+1. 裝 Flutter 的 Linux 桌面建置工具(只需一次):
+   ```bash
+   sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev libsecret-1-dev libjsoncpp-dev
+   ```
+2. 有 RealSense D435f 的話,裝相機用的 Python 套件(x86_64 有現成 wheel,不用編譯):
+   ```bash
+   pip3 install --break-system-packages pyrealsense2 numpy opencv-python-headless
+   ```
+   把相機接到 **USB 3** 埠,確認偵測得到:
+   ```bash
+   python3 deploy/realsense_bridge.py --probe      # 印出序號、韌體、USB 版本就是好了
+   ```
+3. 啟動:
+   ```bash
+   flutter run -d linux
+   ```
+4. App 裡:設定 → 硬體設定 → 相機來源選 **RealSense D435f (RGB-D)** → 按 **偵測相機**(會顯示序號與 USB 版本)→ 按 **測試拍照**(會顯示照片、品質指標與「深度:有效 xx%,中央 yy cm」)→ **儲存**。之後每次拍照都會同時送 RGB 與深度圖。
 
-不經 App、直接用 `test_images/` 的照片加假資料打 server(配對 → 同步 → 上傳 → 去重),用 [tools/send_test_records.py](tools/send_test_records.py),全部互動選單、不用記參數:
+沒有相機:相機來源選 **選擇圖片**,每次拍照改成選一張圖片(沒有深度圖)。想在沒相機的情況下測整條 RGB-D 流程,裝第 2 步的 numpy 與 opencv,改用這個指令啟動,拍照會自動產生一張合成的餐盒 RGB-D:
 
 ```bash
-python tools/send_test_records.py
+SPOONFULL_REALSENSE_MOCK=1 flutter run -d linux
 ```
 
-配對流程與 App 相同:印出配對碼 → 請 Super Admin 到管理後台核准 → 輪詢拿 token。
+**Windows / macOS**:`flutter run -d windows`(或 macos)。相機來源預設就是 **選擇圖片**;秤預設 **不使用秤**,可在硬體設定改成 **模擬秤** 得到假重量。
 
-**Linux 機台建置相依**:`clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libjsoncpp-dev`;執行期需要 `python3 python3-numpy python3-opencv` 與 librealsense / pyrealsense2(Raspberry Pi 要自己編,見 [deploy/build-librealsense.sh](deploy/build-librealsense.sh))。開機自動全螢幕 (kiosk) 的安裝步驟見 [deploy/README.md](deploy/README.md)。
+**還沒有接收器**:加 `--dart-define=USE_MOCK_API=true` 用內建假資料跑,配對不需要管理員核准。
+
+**不經 App 直接打 server**(配對 → 同步 → 上傳 → 去重)用 `test_images/` 的照片:
+
+```bash
+python tools/send_test_records.py      # 全部互動選單
+```
+
+機台(Raspberry Pi)的安裝與開機全螢幕設定見 [deploy/README.md](deploy/README.md)。
 
 | dart-define | 值 | 說明 |
 |---|---|---|

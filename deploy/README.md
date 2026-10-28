@@ -2,30 +2,41 @@
 
 對應 [ARCHITECTURE.md](../ARCHITECTURE.md) §5 與 §11 階段 5。機台只做採集:拍照、秤重、品質檢查、上傳,不跑任何 AI。
 
-## 1. 安裝到機台
+## 1. 安裝到機台 (Raspberry Pi 5,Pi OS Bookworm 64-bit)
 
-```bash
-git clone https://github.com/alianlbj23/spoonfull-flutter-app.git
-cd spoonfull-flutter-app
-sudo ./deploy/install-device.sh --user <登入帳號> [--hx711]
-```
+需要:Pi 5 + 官方 5 A 電源、Intel RealSense D435f 接 **USB 3** 埠(藍色)、已開自動登入的桌面 session(Pi OS Desktop 預設有)。
 
-腳本會從 GitHub Release 下載 CI 編譯的最新版到 `/opt/spoonfull`(已經有 App 就不下載)。**一定要用 Release 的版本**:只有 CI 編譯的版本會自動更新(見 §5)。
+1. 抓專案:
+   ```bash
+   git clone https://github.com/alianlbj23/spoonfull-flutter-app.git
+   cd spoonfull-flutter-app
+   ```
+2. 編相機驅動(只需一次,約 30–45 分鐘;以一般使用者執行,會自己呼叫 sudo):
+   ```bash
+   ./deploy/build-librealsense.sh
+   ```
+   跑完接上相機確認:
+   ```bash
+   rs-enumerate-devices                                   # 列出 D435f
+   python3 deploy/realsense_bridge.py --probe             # 印出序號、韌體、USB 3.x
+   ```
+   腳本最後會在 `~/librealsense/build/` 產出 `librealsense2-*.deb`,留著給下一台機台 `sudo dpkg -i`,就不用再編。
+3. 安裝 App 與開機服務:
+   ```bash
+   sudo ./deploy/install-device.sh --user <登入帳號> [--hx711]
+   ```
+   會從 GitHub Release 下載最新版到 `/opt/spoonfull`、設定裝置權限與 NTP、裝開機全螢幕服務。**一定要用 Release 的版本**,只有它會自動更新(見 §5)。
+4. 重新登入(讓群組權限生效),再開 App:
+   ```bash
+   sudo systemctl start spoonfull-kiosk
+   ```
+5. App 裡:設定 → 硬體設定 → 相機來源 **RealSense D435f (RGB-D)**(Linux 預設已選)→ **偵測相機** → **測試拍照** → 看到照片與「深度:有效 xx%,中央 yy cm」→ 選秤的類型(§3)→ **儲存**。
 
-`install-device.sh` 還會:安裝 RealSense bridge 的 Python 相依 (numpy / OpenCV) 與 libsecret、設定 udev 權限 (RealSense USB、hidraw、ttyUSB)、開 NTP、放一份 `realsense_bridge.py` 到 `/opt/spoonfull`、安裝 `spoonfull-kiosk.service` (開機全螢幕啟動,`SPOONFULL_KIOSK=1`)。
+> 已經在跑的機台,重跑一次 `install-device.sh` 會更新開機服務與 bridge,App 本身不會被覆蓋。
 
-**相機 (RealSense D435f) 要先裝 librealsense + pyrealsense2**,Raspberry Pi 上沒有現成套件,先跑一次 (約 30–45 分鐘,一般使用者執行):
+### Raspberry Pi 4 也可以
 
-```bash
-./deploy/build-librealsense.sh        # 編譯、安裝、裝 udev 規則,並用 cpack 產出 .deb
-rs-enumerate-devices                  # 接上 D435f (USB 3 埠) 後應列出相機
-```
-
-之後的機台把產出的 `librealsense2-*.deb` 帶過去 `sudo dpkg -i` 即可。Pi 5 要配 5 A 電源 (D435f 最高吃 700 mA)。
-
-機台要先有自動登入的桌面 session (Pi OS Desktop 預設有;Jetson 的 Ubuntu 在「設定 → 使用者」開自動登入)。服務啟動後 App 全螢幕、無標題列、隱藏游標。
-
-> 已經在跑的機台,重跑一次 `install-device.sh` 就會裝上「新版啟動失敗時自動退回上一版」的機制(`spoonfull-recover.sh` 與新的 kiosk 服務設定),App 本身不會被覆蓋。
+同樣步驟,差別:要 64-bit Pi OS;第 2 步編譯約 1–1.5 小時,2 GB 記憶體的型號先加 swap 並用 `./deploy/build-librealsense.sh --jobs 2`(或直接拿 Pi 5 編好的 .deb);電源用官方 3 A;相機一樣接藍色 USB 3 埠。
 
 ## 2. 自己編譯(開發用)
 
@@ -56,19 +67,21 @@ sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
 
 相機固定架在餐車上、餐盒放固定位置 (秤面就是放餐盒的位置),餐前餐後角度要一致。D435f 的深度在 **30 cm 以內不可靠**,相機到餐盒建議 40–60 cm;「測試拍照」會顯示深度有效比例與中央距離,拿來確認架設高度。
 
-### RealSense bridge
+### 相機檢查與架設
 
-App 不直接連結 librealsense,拍照時執行 `python3 realsense_bridge.py --once <rgb.jpg> <depth.png> <meta.json>` (逾時 20 秒會砍掉子行程)。bridge 的位置依序找:環境變數 `SPOONFULL_REALSENSE_BRIDGE` → App bundle 內 `data/flutter_assets/deploy/realsense_bridge.py` (隨自動更新) → 執行目錄的 `deploy/` → `/opt/spoonfull/realsense_bridge.py`。Python 執行檔可用 `SPOONFULL_PYTHON` 指定。
+1. 相機接 USB 3 埠,開 App → 硬體設定 → **偵測相機**。顯示「USB 3.x」正常;顯示「USB 2.x (請改接 USB 3 埠)」就換埠或換線。
+2. 把空餐盒放在秤面上,按 **測試拍照**。看三個數字:
+   - 畫面要清楚、不過暗(品質檢查通過);
+   - **深度有效比例**要在 90% 以上,太低代表太近(< 30 cm)或對著反光面;
+   - **中央距離**就是相機到餐盒的距離,建議 40–60 cm。
+3. 數字正常後拍 **空秤參考照**(下一節),再 **儲存**。
 
-手動測試:
+不想開 App 也可以在終端機測:
 
 ```bash
-python3 /opt/spoonfull/realsense_bridge.py --probe                          # 偵測:印 JSON,找不到回 2
-python3 /opt/spoonfull/realsense_bridge.py --once /tmp/a.jpg /tmp/a_depth.png /tmp/a.json
-python3 /opt/spoonfull/realsense_bridge.py --mock --once /tmp/a.jpg /tmp/a_depth.png /tmp/a.json   # 沒相機時的合成影像
+python3 /opt/spoonfull/realsense_bridge.py --probe                                  # 偵測相機
+python3 /opt/spoonfull/realsense_bridge.py --once /tmp/a.jpg /tmp/a_depth.png /tmp/a.json   # 拍一張,看 /tmp/a.jpg
 ```
-
-結束碼:0 成功;1 pyrealsense2 沒裝或參數錯;2 找不到相機;3 擷取失敗 / 逾時。App 對應顯示「相機還沒設定好」/「找不到 RealSense 相機」/「相機沒有回應」。
 
 ### 空秤參考照
 
