@@ -302,9 +302,18 @@ void main() {
       expect(AppConfig.defaultServerHost, 'https://foodintakesystem.com');
       expect(s.host, AppConfig.defaultServerHost);
       expect(s.baseUrl, 'https://foodintakesystem.com/');
-      expect(s.isComplete, isFalse, reason: '場域仍要由使用者填');
+      expect(AppConfig.defaultPlaceId, 'demo');
+      expect(s.placeId, AppConfig.defaultPlaceId);
+      expect(s.isComplete, isTrue, reason: '位址與場域都有預設,開機就能配對');
       // 預設值不寫進偏好,再讀一次仍是預設。
       expect(p.readServerSettings().host, AppConfig.defaultServerHost);
+      expect(p.readServerSettings().placeId, AppConfig.defaultPlaceId);
+    });
+
+    test('a saved empty place is not replaced by the default', () async {
+      final p = await prefs({'device_config.location': ''});
+      expect(p.readServerSettings().placeId, '');
+      expect(p.readServerSettings().isComplete, isFalse);
     });
 
     test('a saved address replaces the default', () async {

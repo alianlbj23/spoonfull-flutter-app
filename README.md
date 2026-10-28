@@ -70,6 +70,7 @@ python tools/send_test_records.py      # 全部互動選單
 | `APP_BUILD` | 整數 / 不設 (0) | 版本編號,CI 帶入 GitHub Actions 的 run number。0 代表本機編譯,**不會自動更新**。設定頁的「系統狀態」會顯示 |
 | `UPDATE_BASE_URL` | URL / 不設 | 自動更新的下載位置,底下要有 `version.json` 與各平台安裝檔。預設是本 repo 的 GitHub Release `latest` |
 | `DEFAULT_SERVER_URL` | URL / 不設 | 機台**還沒存過**伺服器設定時,設定畫面預設帶入的伺服器位址。預設 `https://foodintakesystem.com`(公開站台,經 Cloudflare)。使用者仍可在設定畫面改成任何位址,存過之後就以存的為準。設成空字串或不合法的網址(例如公開網域用 `http://`)等於沒有預設 |
+| `DEFAULT_PLACE_ID` | 文字 / 不設 | 機台**還沒存過**場域時預設帶入的場域 (place_id),預設 `demo`。位址與場域都有預設值時,新機台開機直接按「開始使用」就進入配對,不用先進設定頁。設成空字串等於沒有預設 |
 
 **支援的平台**:Linux (arm64 / x64) 與 Windows,由 CI 編譯。`macos/` 可當開發機用。`android/`、`ios/`、`web/` 是 `flutter create` 產生的範本,沒有設定相機權限、CI 也不編譯,目前不支援。
 
@@ -88,7 +89,7 @@ CI ([.github/workflows/build.yml](.github/workflows/build.yml)) 在每個 PR 與
 - **版本編號**是 GitHub Actions 的 run number (`APP_BUILD`,畫面上的 build 號碼),pubspec 的版本號不用改。
 - **所有機台會在 10 分鐘內自動更新**,所以 push 到 `main` 前請確定測試通過。新版若啟動就失敗,機台會自動退回上一版並不再安裝這個版本 (見 [deploy/README.md](deploy/README.md) §5);修正後再 push 一版即可。
 
-> 伺服器位址由使用者在機台的設定畫面輸入(見第 2 節);新機台預設帶入公開站台 `https://foodintakesystem.com`(可用 `DEFAULT_SERVER_URL` 改預設),要連院內或測試伺服器時直接改掉即可。
+> 新機台的設定畫面預設帶入公開站台 `https://foodintakesystem.com` 與場域 `demo`(可用 `DEFAULT_SERVER_URL` / `DEFAULT_PLACE_ID` 改預設),所以開機直接按「開始使用」就會進入配對;要連院內或測試伺服器時到設定畫面改掉即可。
 
 **Windows 建置注意**:[windows/CMakeLists.txt](windows/CMakeLists.txt) 已加入 `/utf-8` 與 `_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS`,用來解決非 UTF-8 系統語系(例如日文 CP932)及 VS 2026 下 `connectivity_plus` / `permission_handler_windows` 的編譯錯誤。請勿移除。
 
@@ -132,7 +133,7 @@ main()
 ```
 歡迎畫面
  └─ 點左上齒輪 → 伺服器設定畫面
-      輸入:伺服器位址 (預設 https://foodintakesystem.com,可改成任何完整網址)、埠號 (選填)、場域 (place_id)
+      輸入:伺服器位址 (預設 https://foodintakesystem.com,可改成任何完整網址)、埠號 (選填)、場域 (place_id,預設 demo)
       儲存 ─┬─ 尚未配對 → 配對畫面 (Device Authorization Flow,§4.1)
             │     ├─ POST api/machine/pair/start/ → 大字顯示配對碼 (例如 K7QM-42XP) 與倒數
             │     ├─ 管理員到管理後台「機台管理」輸入配對碼核准 (機台名稱由管理員設定)

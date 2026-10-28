@@ -43,8 +43,33 @@ Future<TestEnv> _pairedEnv() async {
 }
 
 void main() {
-  testWidgets('unpaired: settings → pairing → start enabled', (tester) async {
+  testWidgets('fresh install goes straight to pairing', (tester) async {
+    // 位址與場域都有預設值 → 設定齊全,不用進設定頁,開機就顯示配對碼
     final env = await createTestEnv();
+    await _pumpApp(tester, env);
+
+    expect(find.text('請在管理後台核准此機台'), findsOneWidget);
+    expect(find.byKey(const Key('pairing-code')), findsOneWidget);
+    expect(
+      env.services.storage.serverSettings.host,
+      AppConfig.defaultServerHost,
+    );
+    expect(
+      env.services.storage.serverSettings.placeId,
+      AppConfig.defaultPlaceId,
+    );
+
+    // Mock 在第一次輪詢就核准 → 回歡迎頁可開始使用
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('start-button')), findsOneWidget);
+    expect(find.byKey(const Key('welcome-hint')), findsNothing);
+    await _teardown(tester, env);
+  });
+
+  testWidgets('unpaired: settings → pairing → start enabled', (tester) async {
+    // 場域存過空字串 → 不算設定齊全
+    final env = await createTestEnv(prefs: {'device_config.location': ''});
     await _pumpApp(tester, env);
 
     // 未設定:顯示提示對話框,開始使用停用

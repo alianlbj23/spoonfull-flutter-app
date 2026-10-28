@@ -47,11 +47,19 @@ class AppConfig {
     return ServerAddress.resolve(h).isValid ? h : '';
   }
 
+  /// 機台還沒存過場域時,設定畫面預設帶入的場域 (`--dart-define=DEFAULT_PLACE_ID=...`)。
+  /// 位址與場域都有預設值時,新機台開機就能直接「開始使用」進入配對,不必先填設定。
+  /// 設成空字串等於沒有預設,使用者要自己填。
+  static const String _defaultPlaceId = String.fromEnvironment(
+    'DEFAULT_PLACE_ID',
+    defaultValue: 'demo',
+  );
+  static final String defaultPlaceId = _defaultPlaceId.trim();
+
   /// 自動更新的下載位置:底下要有 `version.json` 與各平台的安裝檔。
   static const String updateBaseUrl = String.fromEnvironment(
     'UPDATE_BASE_URL',
-    defaultValue:
-        'https://github.com/alianlbj23/spoonfull-flutter-app/releases/latest/download/',
+    defaultValue: 'https://github.com/alianlbj23/spoonfull-flutter-app/releases/latest/download/',
   );
 
   static AppEnvironment get environment => switch (_envName) {

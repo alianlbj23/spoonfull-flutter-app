@@ -61,8 +61,9 @@ class PreferencesStorage {
     await _setOrRemoveInt(_serverDeviceId, c.serverDeviceId);
   }
 
-  /// 從沒存過伺服器設定的機台 (沒有 host 這個 key) 預設連到
-  /// [AppConfig.defaultServerHost];預設值不寫進偏好,存過一次就以存的為準。
+  /// 從沒存過伺服器設定的機台 (沒有 host / location 這兩個 key) 預設連到
+  /// [AppConfig.defaultServerHost]、場域 [AppConfig.defaultPlaceId];
+  /// 預設值不寫進偏好,存過一次就以存的為準 (存空字串也算存過)。
   ServerSettings readServerSettings() {
     final stored = _prefs.getString(_serverHost);
     var host = stored ?? '';
@@ -84,7 +85,7 @@ class PreferencesStorage {
     return ServerSettings(
       host: host,
       port: port,
-      placeId: _prefs.getString(_location) ?? '',
+      placeId: _prefs.getString(_location) ?? AppConfig.defaultPlaceId,
     );
   }
 
