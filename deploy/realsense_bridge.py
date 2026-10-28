@@ -94,10 +94,18 @@ def _import_rs():
     except ImportError:
         log("找不到 pyrealsense2。Raspberry Pi 請執行 deploy/build-librealsense.sh;x86_64 可 pip install pyrealsense2。")
         sys.exit(EXIT_USAGE)
-    # 某些打包方式會多一層 pyrealsense2.pyrealsense2
+    # pip 的 wheel 多一層 pyrealsense2.pyrealsense2 (__version__ 也只在裡面那層)
     if not hasattr(rs, "pipeline") and hasattr(rs, "pyrealsense2"):
         rs = rs.pyrealsense2
     return rs
+
+
+def _rs_version(rs) -> str | None:
+    for m in (rs, getattr(rs, "pyrealsense2", None)):
+        v = getattr(m, "__version__", None)
+        if v:
+            return str(v)
+    return None
 
 
 def _info(dev, rs, key: str) -> str | None:
@@ -135,7 +143,7 @@ def probe(args) -> int:
         log("找不到 RealSense 相機" + (f" (序號 {args.serial})" if args.serial else ""))
         return EXIT_NO_DEVICE
     described = [describe_device(d, rs) for d in devices]
-    print(json.dumps({"found": True, "librealsense": getattr(rs, "__version__", None), **described[0],
+    print(json.dumps({"found": True, "librealsense": _rs_version(rs), **described[0],
                       "devices": described}, ensure_ascii=False))
     return 0
 
@@ -211,7 +219,7 @@ def capture_real(args, rgb_path: Path, depth_path: Path, meta_path: Path) -> int
             "format": FORMAT,
             "mock": False,
             **info,
-            "librealsense": getattr(rs, "__version__", None),
+            "librealsense": _rs_version(rs),
             "width": int(intr.width),
             "height": int(intr.height),
             "depth_unit_m": 0.001,

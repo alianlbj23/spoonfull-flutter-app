@@ -80,7 +80,7 @@ for d in /usr/local/lib/python${PY_VER}/site-packages /usr/local/lib/python${PY_
     break
   fi
 done
-$PY -c "import pyrealsense2 as rs; print('pyrealsense2', rs.__version__)"
+$PY -c "import pyrealsense2 as rs; m = rs if hasattr(rs, 'pipeline') else rs.pyrealsense2; print('pyrealsense2', getattr(m, '__version__', 'ok'))"
 
 echo "== 打包 .deb 給下一台機台 (可略過失敗)"
 cpack -G DEB 2>/dev/null && ls -1 "$SRC_DIR"/build/*.deb || echo "   cpack 失敗,略過 (不影響這台)"

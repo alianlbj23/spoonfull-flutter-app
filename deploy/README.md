@@ -31,7 +31,7 @@
    跑完接上相機確認:
    ```bash
    rs-enumerate-devices                                   # 列出 D435f
-   python3 deploy/realsense_bridge.py --probe             # 印出序號、韌體、USB 3.x
+   python3 deploy/realsense_bridge.py --probe             # 印出序號、韌體、USB 3.x (不要用 rs.__version__ 檢查,pip 版沒有)
    ```
    腳本最後會在 `~/librealsense/build/` 產出 `librealsense2-*.deb`,留著給下一台機台 `sudo dpkg -i`,就不用再編。
 3. 安裝 App 與開機服務:
