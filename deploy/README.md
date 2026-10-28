@@ -2,6 +2,19 @@
 
 對應 [ARCHITECTURE.md](../ARCHITECTURE.md) §5 與 §11 階段 5。機台只做採集:拍照、秤重、品質檢查、上傳,不跑任何 AI。
 
+## 0. 這個資料夾裡每個檔案怎麼用
+
+| 檔案 | 在哪裡跑 | 什麼時候跑 | 指令 |
+|---|---|---|---|
+| `build-librealsense.sh` | 機台 (Pi),一般使用者 | 新機台第一次,裝相機驅動 (librealsense + pyrealsense2)。約 30–45 分鐘 | `./deploy/build-librealsense.sh`<br>選項:`--version v2.56.3` 指定 librealsense 版本、`--jobs 2` 減少同時編譯數 (記憶體小的 Pi)、`--dir ~/librealsense` 原始碼放哪 |
+| `install-device.sh` | 機台,`sudo` | 新機台第一次;之後要更新開機服務或 bridge 再跑一次 (App 不會被覆蓋) | `sudo ./deploy/install-device.sh --user <登入帳號>`<br>選項:`--hx711` 同時裝 HX711 GPIO 秤的服務、`--skip-download` 不下載 Release (用自己 `flutter build` 放進 `/opt/spoonfull` 的版本)。環境變數 `SPOONFULL_RELEASE_URL` 可改下載來源 |
+| `realsense_bridge.py` | 機台或開發電腦 | 不用手動跑,App 拍照時會自己呼叫。手動只用來檢查相機 | `python3 deploy/realsense_bridge.py --probe` 偵測相機 (找不到結束碼 2)<br>`python3 deploy/realsense_bridge.py --once a.jpg a_depth.png a.json` 拍一張 RGB-D<br>加 `--mock` 沒相機也會產生合成影像;`--serial <序號>` 指定相機;`--width 640 --height 480` 改解析度 |
+| `hx711_bridge.py` | 機台 | HX711 直接接 GPIO 時。先校正一次,之後由 `spoonfull-hx711.service` 開機自動跑 | 校正:`python3 /opt/spoonfull/hx711_bridge.py --calibrate 500` (放 500 g 砝碼,照提示按 Enter)<br>看讀數:`python3 /opt/spoonfull/hx711_bridge.py --print`<br>電腦上測假資料:`--fake`;腳位 `--dout 5 --sck 6` (BCM) |
+| `spoonfull-recover.sh` | 機台,自動 | 不用手動跑。開機服務每次啟動 App 前會執行,新版啟動失敗時換回上一版 (§5) | 手動強制還原上一版:`sh /opt/spoonfull/spoonfull-recover.sh /opt/spoonfull` |
+| `spoonfull-kiosk.service` | 機台 | 由 `install-device.sh` 安裝,不用手動複製 | 看狀態:`systemctl status spoonfull-kiosk`;重啟 App:`sudo systemctl restart spoonfull-kiosk`;看 log:`journalctl -u spoonfull-kiosk -f`;開發時先停掉:`sudo systemctl stop spoonfull-kiosk` |
+| `spoonfull-hx711.service` | 機台 | 由 `install-device.sh --hx711` 安裝 | `systemctl status spoonfull-hx711`;看輸出:`nc 127.0.0.1 9100` |
+| `99-spoonfull-hardware.rules` | 機台 | 由 `install-device.sh` 安裝到 `/etc/udev/rules.d/`。改過後重載:`sudo udevadm control --reload-rules && sudo udevadm trigger` | 讓一般使用者能開 RealSense (USB)、USB HID 秤 (`/dev/hidraw*`)、序列埠秤 (`/dev/ttyUSB*`) |
+
 ## 1. 安裝到機台 (Raspberry Pi 5,Pi OS Bookworm 64-bit)
 
 需要:Pi 5 + 官方 5 A 電源、Intel RealSense D435f 接 **USB 3** 埠(藍色)、已開自動登入的桌面 session(Pi OS Desktop 預設有)。
