@@ -61,7 +61,7 @@ SPOONFULL_REALSENSE_MOCK=1 flutter run -d linux
 python tools/send_test_records.py      # 全部互動選單
 ```
 
-機台(Raspberry Pi)的安裝與開機全螢幕設定見 [deploy/README.md](deploy/README.md)。
+機台(Raspberry Pi)的安裝與全螢幕 kiosk 設定(預設不開機自動啟動)見 [deploy/README.md](deploy/README.md)。
 
 | dart-define | 值 | 說明 |
 |---|---|---|

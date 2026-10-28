@@ -7,11 +7,12 @@
 #   2. 開放 RealSense (USB)、/dev/hidraw* (USB HID 秤)、/dev/ttyUSB*、/dev/ttyACM* (序列埠秤) 權限
 #   3. 啟用 NTP 自動校時 (capture_time 要可信)
 #   4. 下載最新版 App 到 /opt/spoonfull (已經有就略過),安裝 kiosk systemd 服務
-#      (開機自動全螢幕啟動 App,自動更新失敗時退回上一版);同時放一份 realsense_bridge.py
+#      (全螢幕啟動 App,自動更新失敗時退回上一版);同時放一份 realsense_bridge.py。
+#      預設「不會」開機自動啟動 App,要的話加 --autostart
 #   5. (選用) HX711 GPIO bridge 服務
 #
 # 用法 (在機台上):
-#   sudo ./install-device.sh [--user <登入帳號>] [--hx711] [--skip-download]
+#   sudo ./install-device.sh [--user <登入帳號>] [--autostart] [--hx711] [--skip-download]
 #
 # 預設會從 GitHub Release 下載 CI 編譯的版本,這樣才會自動更新;
 # 自己 flutter build 的版本 (APP_BUILD=0) 不會自動更新,只適合開發。
@@ -19,11 +20,13 @@ set -euo pipefail
 
 APP_USER="${SUDO_USER:-$(id -un)}"
 WITH_HX711=0
+AUTOSTART=0
 DOWNLOAD=1
 RELEASE_URL="${SPOONFULL_RELEASE_URL:-https://github.com/alianlbj23/spoonfull-flutter-app/releases/latest/download}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --user) APP_USER="$2"; shift 2 ;;
+    --autostart) AUTOSTART=1; shift ;;
     --hx711) WITH_HX711=1; shift ;;
     --skip-download) DOWNLOAD=0; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
@@ -89,7 +92,14 @@ install -m 755 "$HERE/realsense_bridge.py" "$INSTALL_DIR/realsense_bridge.py"
 chown -R "$APP_USER" "$INSTALL_DIR"
 sed "s/__USER__/$APP_USER/g" "$HERE/spoonfull-kiosk.service" > /etc/systemd/system/spoonfull-kiosk.service
 systemctl daemon-reload
-systemctl enable spoonfull-kiosk.service
+if [[ $AUTOSTART -eq 1 ]]; then
+  systemctl enable spoonfull-kiosk.service
+  echo "   已設定開機自動啟動 App (--autostart)"
+else
+  # 預設不自動啟動:之前裝過的機台若已 enable,這裡一併關掉並停止,避免一登入就跳出 App
+  systemctl disable --now spoonfull-kiosk.service 2>/dev/null || true
+  echo "   不會開機自動啟動 App (要的話重跑並加 --autostart,或 sudo systemctl enable --now spoonfull-kiosk)"
+fi
 
 if [[ $WITH_HX711 -eq 1 ]]; then
   echo "== 5/5 HX711 GPIO bridge"
@@ -104,7 +114,11 @@ else
 fi
 
 echo
-echo "完成。重新開機後 App 會全螢幕啟動;現在可用 sudo systemctl start spoonfull-kiosk 先試跑。"
+if [[ $AUTOSTART -eq 1 ]]; then
+  echo "完成。重新開機後 App 會全螢幕啟動;現在可用 sudo systemctl start spoonfull-kiosk 先試跑。"
+else
+  echo "完成。要開 App:sudo systemctl start spoonfull-kiosk (全螢幕),關掉:sudo systemctl stop spoonfull-kiosk。"
+fi
 echo "請重新登入 $APP_USER 讓群組 (plugdev / video / dialout) 生效。"
 echo "相機:把 D435f 接到 USB 3 埠,執行 python3 $INSTALL_DIR/realsense_bridge.py --probe 應印出序號;"
 echo "      App 的硬體設定 → 相機來源「RealSense D435f (RGB-D)」→「偵測相機」→「測試拍照」。"
