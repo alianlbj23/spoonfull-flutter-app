@@ -10,11 +10,15 @@ import '../../services/hardware/hardware_service.dart';
 import '../../state/record_state.dart';
 import '../widgets/app_assets.dart';
 import '../widgets/buttons.dart';
+import 'camera_preview_screen.dart';
 
-enum _QualityChoice { retake, keep, cancel }
+/// 品質檢查不通過時使用者的選擇。
+enum QualityChoice { retake, keep, cancel }
 
 /// 拍照流程 (ARCHITECTURE.md §5.1):
-/// 顯示「拍照中」→ 擷取 + 秤重 → 品質檢查不通過時提示重拍 → 回傳結果。
+/// 相機能即時預覽時 (RealSense) 開 [CameraPreviewScreen]:顯示畫面、按快門才拍,
+/// 品質不佳的重拍也在同一個畫面裡完成。
+/// 其他情況顯示「拍照中」→ 擷取 + 秤重 → 品質檢查不通過時提示重拍 → 回傳結果。
 /// [method] 為 [CaptureMethod.file] 時改為選擇圖片檔案,重拍也沿用同一種方式。
 /// 使用者取消時回傳 null;錯誤會往外丟,由呼叫端顯示。
 Future<CaptureResult?> runCaptureFlow(
@@ -22,6 +26,11 @@ Future<CaptureResult?> runCaptureFlow(
   CaptureMethod method = CaptureMethod.camera,
 }) async {
   final state = context.read<RecordState>();
+  if (method == CaptureMethod.camera && state.previewSupported) {
+    return Navigator.of(context).push<CaptureResult?>(
+      MaterialPageRoute(builder: (_) => const CameraPreviewScreen()),
+    );
+  }
   while (true) {
     if (!context.mounted) return null;
     final result = await _withProgress(
@@ -33,18 +42,18 @@ Future<CaptureResult?> runCaptureFlow(
     if (!state.qualityCheckEnabled || result.quality.passed) return result;
     if (!context.mounted) return result;
 
-    final choice = await showDialog<_QualityChoice>(
+    final choice = await showDialog<QualityChoice>(
       context: context,
       barrierDismissible: false,
       builder: (_) => QualityWarningDialog(result: result),
     );
     switch (choice) {
-      case _QualityChoice.keep:
+      case QualityChoice.keep:
         return result;
-      case _QualityChoice.retake:
+      case QualityChoice.retake:
         await state.discardImage(result.imagePath);
         continue;
-      case _QualityChoice.cancel:
+      case QualityChoice.cancel:
       case null:
         await state.discardImage(result.imagePath);
         return null;
@@ -189,7 +198,7 @@ class QualityWarningDialog extends StatelessWidget {
                     fontSize: 26,
                     background: AppColors.periwinkle,
                     onPressed: () =>
-                        Navigator.of(context).pop(_QualityChoice.cancel),
+                        Navigator.of(context).pop(QualityChoice.cancel),
                   ),
                   const SizedBox(width: 12),
                   PrimaryButton(
@@ -200,7 +209,7 @@ class QualityWarningDialog extends StatelessWidget {
                     fontSize: 26,
                     background: AppColors.periwinkle,
                     onPressed: () =>
-                        Navigator.of(context).pop(_QualityChoice.keep),
+                        Navigator.of(context).pop(QualityChoice.keep),
                   ),
                   const SizedBox(width: 12),
                   PrimaryButton(
@@ -210,7 +219,7 @@ class QualityWarningDialog extends StatelessWidget {
                     height: 64,
                     fontSize: 28,
                     onPressed: () =>
-                        Navigator.of(context).pop(_QualityChoice.retake),
+                        Navigator.of(context).pop(QualityChoice.retake),
                   ),
                 ],
               ),

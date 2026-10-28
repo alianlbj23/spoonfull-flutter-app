@@ -113,6 +113,10 @@ class AppConstants {
   /// 偵測相機 (`--probe`) 的逾時。
   static const Duration cameraProbeTimeout = Duration(seconds: 10);
 
+  /// 拍照畫面的即時預覽:影格縮到這個寬度、每秒張數 (Raspberry Pi 也跑得動)。
+  static const int previewWidth = 640;
+  static const int previewFps = 10;
+
   // --- 拍照品質檢查 (純 CPU,ARCHITECTURE.md §5.1) ---
   /// 分析前先縮到此寬度,門檻皆以此尺度校正。
   static const int qualityAnalysisWidth = 320;

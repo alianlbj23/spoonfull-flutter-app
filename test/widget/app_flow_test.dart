@@ -4,6 +4,7 @@ import 'package:spoonfull_flutter_app/app.dart';
 import 'package:spoonfull_flutter_app/config/app_config.dart';
 import 'package:spoonfull_flutter_app/data/api/mock_api_repository.dart';
 import 'package:spoonfull_flutter_app/data/models/auth_token.dart';
+import 'package:spoonfull_flutter_app/ui/screens/camera_preview_screen.dart';
 import 'package:spoonfull_flutter_app/core/utils/time_utils.dart';
 
 import '../helpers/test_services.dart';
@@ -196,6 +197,46 @@ void main() {
     await tester.tap(find.bySemanticsLabel('返回').last);
     await tester.pumpAndSettle();
     expect(find.text('確認放入餐點後進行下一步'), findsNothing);
+    await _teardown(tester, env);
+  });
+
+  testWidgets('拍照 opens the live preview with a shutter button', (
+    tester,
+  ) async {
+    final env = await _pairedEnv();
+    await _pumpApp(tester, env);
+
+    await tester.tap(find.byKey(const Key('start-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('room-R101')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('bed-R101-B1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('phase-before')));
+    await tester.pumpAndSettle();
+
+    // 「拍照」→ 預覽畫面:還沒有影格前快門不能按
+    await tester.tap(find.byKey(const Key('next-step')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('shutter')), findsOneWidget);
+    expect(find.byKey(const Key('preview-starting')), findsOneWidget);
+    expect(find.byKey(const Key('capture-progress')), findsNothing);
+    final shutter = find.byKey(const Key('shutter'));
+    expect(tester.widget<ShutterButton>(shutter).enabled, isFalse);
+
+    // 模擬相機每 100 ms 送一張影格 → 畫面出現、快門可以按
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const Key('preview-frame')), findsOneWidget);
+    expect(find.byKey(const Key('preview-starting')), findsNothing);
+    expect(tester.widget<ShutterButton>(shutter).enabled, isTrue);
+    expect(find.text('放好餐盒後\n按下快門'), findsOneWidget);
+
+    // 返回 → 關掉預覽,回到餐前 / 餐後畫面
+    await tester.tap(find.bySemanticsLabel('返回').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('shutter')), findsNothing);
+    expect(find.text('新增食物攝取紀錄'), findsOneWidget);
     await _teardown(tester, env);
   });
 

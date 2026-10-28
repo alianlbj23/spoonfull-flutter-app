@@ -12,6 +12,7 @@ import '../data/models/room_data.dart';
 import '../data/models/weight_reading.dart';
 import '../services/app_services.dart';
 import '../core/utils/logger.dart';
+import '../services/hardware/camera_service.dart';
 import '../services/hardware/hardware_service.dart';
 import '../services/local_storage_service.dart';
 import '../services/record_service.dart';
@@ -167,14 +168,22 @@ class RecordState extends ChangeNotifier {
     );
   }
 
+  /// 相機能即時預覽:拍照畫面先顯示畫面,按快門才拍。
+  bool get previewSupported => _services.records.previewSupported;
+
+  /// 開預覽串流 (拍照畫面用;用完要 [CameraPreview.close])。
+  CameraPreview openPreview() => _services.records.openPreview();
+
   /// 拍照 + 秤重 (ARCHITECTURE.md §5.1)。使用者取消時回傳 null。
+  /// [via] 為拍照畫面的預覽串流時從它拍。
   Future<CaptureResult?> capture({
     CaptureMethod method = CaptureMethod.camera,
+    CaptureSource? via,
   }) async {
     capturing = true;
     notifyListeners();
     try {
-      return await _services.records.capture(method: method);
+      return await _services.records.capture(method: method, via: via);
     } finally {
       capturing = false;
       notifyListeners();

@@ -28,7 +28,7 @@
   - 本機:`meal_records` v4 加 `depth_path` / `depth_meta_path`;佇列 request_data 帶兩個路徑;`discardImage` / `purgeExpired` / 孤兒清理都連深度檔一起處理。
   - 硬體設定頁:來源兩個選項、序號欄、「偵測相機」按鈕顯示摘要 (USB 2 會提示換埠);測試拍照對話框多一行深度統計。移除解析度 / MJPEG 選項。
   - 測試:`test/unit/realsense_camera_test.dart` (成功 / 找不到相機 / 沒裝 / 逾時 / 缺檔 / 尺寸不符 / probe / 舊值遷移)、`capture_test.dart` RGB-D 群組 (搬檔、上傳欄位、佇列還原、丟棄、清理、參考照)、`api_client_test.dart` multipart 含 depth。全部 185 個測試通過 (Flutter 3.47.6)。
-- **部署**:[deploy/build-librealsense.sh](deploy/build-librealsense.sh) (Pi 5 原生編 librealsense v2.56.3 + pyrealsense2,裝 udev 規則,cpack 出 .deb);`install-device.sh` 改裝 numpy / OpenCV、檢查 pyrealsense2、放 bridge 到 `/opt/spoonfull`;udev 規則加 RealSense USB (8086:0bxx)。
+- **拍照畫面 (2026-10-28)**:按「拍照」不再直接拍,先開 [lib/ui/screens/camera_preview_screen.dart](lib/ui/screens/camera_preview_screen.dart):bridge 以 `--preview` 一直開著 (stdout 送 640 寬 JPEG 每秒 10 張,stdin 收 `{"cmd":"capture",...}` / `{"cmd":"quit"}`,格式見 bridge 開頭),`RealSensePreview` 解析訊息 ([bridge_protocol.dart](lib/services/hardware/bridge_protocol.dart)) 餵 `Image.memory`;快門從同一條串流拍 (`HardwareService.capture(via:)`),品質不佳的重拍不用重開相機。啟動失敗 / 串流中斷顯示原因與「重試」。`MockCameraService` 也有預覽 (widget 測試用);「選擇檔案」與沒有預覽能力的相機走原本的流程。測試 200 個。 (Pi 5 原生編 librealsense v2.56.3 + pyrealsense2,裝 udev 規則,cpack 出 .deb);`install-device.sh` 改裝 numpy / OpenCV、檢查 pyrealsense2、放 bridge 到 `/opt/spoonfull`;udev 規則加 RealSense USB (8086:0bxx)。
 - 文件:README §1 / §2.2 / §4.6 (`depth`、`depth_meta` 欄位與範例) / §6、deploy/README §1 / §3 / §4 / §6、ARCHITECTURE §5.1。
 
 ### 待辦 (需要機台或 server)

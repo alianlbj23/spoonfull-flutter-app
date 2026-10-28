@@ -13,9 +13,16 @@ import '../../config/app_constants.dart';
 import '../../core/errors/app_exception.dart';
 import '../../core/utils/logger.dart';
 import '../../data/models/hardware_config.dart';
+import 'bridge_protocol.dart';
 import 'depth_image.dart';
 
 typedef ProcessRunner = Future<ProcessResult> Function(
+  String executable,
+  List<String> arguments,
+);
+
+/// 啟動長時間執行的外部程式 (預覽串流);測試可注入假的 [Process]。
+typedef ProcessStarter = Future<Process> Function(
   String executable,
   List<String> arguments,
 );
@@ -76,16 +83,40 @@ class RawCapture {
   bool get hasDepth => depthPath != null;
 }
 
+/// 能拍一張原始照片的東西:相機本身,或已經開著的預覽串流 ([CameraPreview])。
+abstract interface class CaptureSource {
+  /// 擷取到 [outputPath] (副檔名由實作決定,回傳實際路徑);使用者取消時回 null。
+  Future<RawCapture?> capture(String outputPath);
+}
+
+/// 拍照畫面的即時預覽:畫面從 [frames] 來,按快門時 ([capture]) 從同一條串流拍。
+/// 用完一定要 [close],相機才會釋放。
+abstract class CameraPreview implements CaptureSource {
+  /// 預覽影格 (JPEG)。串流結束 (程式退出或 [close]) 時關閉。
+  Stream<Uint8List> get frames;
+
+  /// 串流啟動完成;失敗時丟 [AppException] (找不到相機、bridge 沒裝…)。
+  Future<void> get ready;
+
+  Future<void> close();
+}
+
 /// 相機擷取:拍一張原始照片 (RealSense 連同深度圖) 寫到指定路徑。
 /// 壓縮與品質檢查由 [ImagePipeline] 負責。
-abstract class CameraService {
+abstract class CameraService implements CaptureSource {
   const CameraService();
 
-  /// 擷取到 [outputPath] (副檔名由實作決定,回傳實際路徑);使用者取消時回 null。
+  @override
   Future<RawCapture?> capture(String outputPath);
 
   /// 顯示在硬體設定頁的說明。
   String get description;
+
+  /// 能即時預覽 ([openPreview]);拍照畫面會先顯示畫面再等使用者按快門。
+  bool get supportsPreview => false;
+
+  /// 開預覽串流 (立刻回傳,啟動結果看 [CameraPreview.ready])。
+  CameraPreview openPreview() => throw UnsupportedError('$description 不支援即時預覽');
 
   Future<void> dispose() async {}
 
@@ -93,9 +124,14 @@ abstract class CameraService {
   static CameraService create(
     CameraSettings settings, {
     ProcessRunner? runner,
+    ProcessStarter? starter,
     ImagePicker? picker,
   }) => switch (settings.source) {
-    CameraSource.realsense => RealSenseCameraService(settings, runner: runner),
+    CameraSource.realsense => RealSenseCameraService(
+      settings,
+      runner: runner,
+      starter: starter,
+    ),
     CameraSource.picker => ImagePickerCameraService(picker: picker),
   };
 }
@@ -156,11 +192,13 @@ class RealSenseCameraService extends CameraService {
   RealSenseCameraService(
     this.settings, {
     ProcessRunner? runner,
+    ProcessStarter? starter,
     String? bridgePath,
     String? python,
     bool? mock,
     Map<String, String>? environment,
   }) : _run = runner ?? _defaultRunner,
+       _start = starter ?? Process.start,
        _env = environment ?? Platform.environment,
        _bridgeOverride = bridgePath,
        _pythonOverride = python,
@@ -168,6 +206,7 @@ class RealSenseCameraService extends CameraService {
 
   final CameraSettings settings;
   final ProcessRunner _run;
+  final ProcessStarter _start;
   final Map<String, String> _env;
   final String? _bridgeOverride;
   final String? _pythonOverride;
@@ -241,6 +280,27 @@ class RealSenseCameraService extends CameraService {
     '--probe',
     ..._commonArgs(),
   ];
+
+  /// `--preview` 的參數:預覽影格縮到 640 寬、每秒 10 張 (Pi 也跑得動)。
+  List<String> previewArgs() => [
+    bridgePath ?? bridgeFileName,
+    '--preview',
+    '--width',
+    '${settings.width}',
+    '--height',
+    '${settings.height}',
+    '--preview-fps',
+    '${AppConstants.previewFps}',
+    '--preview-width',
+    '${AppConstants.previewWidth}',
+    ..._commonArgs(),
+  ];
+
+  @override
+  bool get supportsPreview => true;
+
+  @override
+  CameraPreview openPreview() => RealSensePreview(this);
 
   /// 偵測相機 (硬體設定頁的「偵測相機」)。找不到 / bridge 沒裝都丟 [AppException]。
   Future<RealSenseInfo> probe() async {
@@ -326,6 +386,27 @@ class RealSenseCameraService extends CameraService {
         _ => 'CAMERA_FAILED',
       }, 'bridge exit ${result.exitCode}: $stderr');
     }
+    final raw = await validateOutput(rgb, depth, meta, stderr: stderr);
+    Log.i('realsense capture: ${result.stdout.toString().trim()}');
+    return raw;
+  }
+
+  /// 檢查 bridge 寫出的三個檔案:RGB 非空、深度是 16-bit 灰階 PNG 且尺寸和 meta
+  /// 一致。不合格時刪掉檔案再丟 [AppException]。
+  static Future<RawCapture> validateOutput(
+    String rgb,
+    String depth,
+    String meta, {
+    String stderr = '',
+  }) async {
+    void discard() {
+      for (final f in [rgb, depth, meta]) {
+        try {
+          File(f).deleteSync();
+        } catch (_) {}
+      }
+    }
+
     final rgbFile = File(rgb);
     final depthFile = File(depth);
     final metaFile = File(meta);
@@ -363,7 +444,6 @@ class RealSenseCameraService extends CameraService {
         'depth ${head.width}x${head.height} != meta ${mw}x$mh',
       );
     }
-    Log.i('realsense capture: ${result.stdout.toString().trim()}');
     return RawCapture(imagePath: rgb, depthPath: depth, depthMetaPath: meta);
   }
 
@@ -392,6 +472,263 @@ class RealSenseCameraService extends CameraService {
       '${p.withoutExtension(imagePath)}_depth.png';
   static String depthMetaPathFor(String imagePath) =>
       '${p.withoutExtension(imagePath)}_depth.json';
+}
+
+/// RealSense 的預覽串流:`realsense_bridge.py --preview` 一直開著,stdout 送
+/// 影格、stdin 收拍照指令 (格式見 bridge 開頭與 [BridgeMessageParser])。
+///
+/// 啟動失敗 (bridge 沒裝、找不到相機、逾時) 從 [ready] 丟出;串流途中斷掉
+/// (相機被拔) 時 [frames] 會關閉,之後的 [capture] 會失敗,畫面要提示重試。
+class RealSensePreview extends CameraPreview {
+  RealSensePreview(this._camera) {
+    _ready.future.ignore();
+    unawaited(_launch());
+  }
+
+  final RealSenseCameraService _camera;
+  final _frames = StreamController<Uint8List>.broadcast();
+  final _ready = Completer<RealSenseInfo>();
+  final _stderrTail = <String>[];
+  Process? _process;
+  Completer<BridgeMessage>? _reply;
+  Timer? _readyTimer;
+  bool _closing = false;
+
+  /// `ready` 訊息帶回的相機資訊 (啟動完成後才有)。
+  RealSenseInfo? info;
+
+  @override
+  Stream<Uint8List> get frames => _frames.stream;
+
+  @override
+  Future<void> get ready => _ready.future;
+
+  /// 串流還活著 (程式在跑、還沒 [close])。
+  bool get running => _process != null && !_closing;
+
+  Future<void> _launch() async {
+    final bridge = _camera.bridgePath;
+    if (bridge == null) {
+      _fail(
+        _cameraError(
+          'CAMERA_UNAVAILABLE',
+          'realsense_bridge.py not found in '
+              '${RealSenseCameraService.bridgeCandidates()}',
+        ),
+      );
+      return;
+    }
+    final Process process;
+    try {
+      process = await _camera._start(_camera.python, _camera.previewArgs());
+    } on ProcessException catch (e) {
+      _fail(
+        _cameraError('CAMERA_UNAVAILABLE', '${_camera.python}: ${e.message}'),
+      );
+      return;
+    }
+    if (_closing) {
+      process.kill(ProcessSignal.sigkill);
+      return;
+    }
+    _process = process;
+    // 子行程結束後再寫 stdin 會出錯;錯誤從 flush() 回報,done 的不用再管。
+    unawaited(process.stdin.done.catchError((_) {}));
+    final parser = BridgeMessageParser(_onMessage);
+    process.stdout.listen(
+      (chunk) {
+        try {
+          parser.add(chunk);
+        } on FormatException catch (e) {
+          Log.e('realsense preview: bad message', e);
+          process.kill(ProcessSignal.sigkill);
+        }
+      },
+      onError: (Object e) => Log.e('realsense preview: stdout', e),
+      cancelOnError: true,
+    );
+    process.stderr
+        .transform(systemEncoding.decoder)
+        .transform(const LineSplitter())
+        .listen((line) {
+          _stderrTail.add(line);
+          if (_stderrTail.length > 20) _stderrTail.removeAt(0);
+          Log.d('realsense: $line');
+        }, onError: (Object _) {});
+    _readyTimer = Timer(AppConstants.cameraProbeTimeout + _runnerGrace, () {
+      if (_ready.isCompleted) return;
+      _fail(_cameraError('CAMERA_TIMEOUT', 'preview not ready'));
+      process.kill(ProcessSignal.sigkill);
+    });
+    unawaited(process.exitCode.then(_onExit));
+  }
+
+  void _onMessage(BridgeMessage msg) {
+    switch (msg.kind) {
+      case 'ready':
+        final json = RealSenseCameraService._parseJsonLine(
+          utf8.decode(msg.payload, allowMalformed: true),
+        );
+        info = json == null ? null : RealSenseInfo.fromJson(json);
+        Log.i('realsense preview ready: ${info?.summary}');
+        if (!_ready.isCompleted) {
+          _ready.complete(info ?? const RealSenseInfo(serial: '', name: ''));
+        }
+      case 'frame':
+        if (!_frames.isClosed) _frames.add(msg.payload);
+      case 'captured' || 'error':
+        final reply = _reply;
+        _reply = null;
+        if (reply != null && !reply.isCompleted) {
+          reply.complete(msg);
+        } else if (msg.kind == 'error') {
+          Log.e(
+            'realsense preview',
+            utf8.decode(msg.payload, allowMalformed: true),
+          );
+        }
+      default:
+        Log.e('realsense preview: unknown message', msg.kind);
+    }
+  }
+
+  void _onExit(int code) {
+    _readyTimer?.cancel();
+    _process = null;
+    if (!_closing) {
+      final err = _cameraError(switch (code) {
+        2 => 'CAMERA_NOT_FOUND',
+        1 => 'CAMERA_UNAVAILABLE',
+        _ => 'CAMERA_FAILED',
+      }, 'preview exit $code: ${_stderrTail.join('\n')}');
+      _fail(err);
+    }
+    _frames.close();
+  }
+
+  void _fail(AppException error) {
+    if (!_ready.isCompleted) _ready.completeError(error);
+    final reply = _reply;
+    _reply = null;
+    if (reply != null && !reply.isCompleted) reply.completeError(error);
+    if (_process == null) _frames.close();
+  }
+
+  @override
+  Future<RawCapture?> capture(String outputPath) async {
+    await ready;
+    final process = _process;
+    if (process == null || _closing) {
+      throw _cameraError('CAMERA_FAILED', 'preview stream ended');
+    }
+    if (_reply != null) {
+      throw _cameraError('CAMERA_FAILED', 'capture already in progress');
+    }
+    final rgb = p.setExtension(outputPath, '.jpg');
+    final depth = RealSenseCameraService.depthPathFor(rgb);
+    final meta = RealSenseCameraService.depthMetaPathFor(rgb);
+    await File(rgb).parent.create(recursive: true);
+    void discard() {
+      for (final f in [rgb, depth, meta]) {
+        try {
+          File(f).deleteSync();
+        } catch (_) {}
+      }
+    }
+
+    final reply = _reply = Completer<BridgeMessage>();
+    reply.future.ignore();
+    try {
+      process.stdin.writeln(
+        jsonEncode({
+          'cmd': 'capture',
+          'rgb': rgb,
+          'depth': depth,
+          'meta': meta,
+        }),
+      );
+      await process.stdin.flush();
+    } on Object catch (e) {
+      _reply = null;
+      throw _cameraError('CAMERA_FAILED', 'preview stdin: $e');
+    }
+    final BridgeMessage msg;
+    try {
+      msg = await reply.future.timeout(AppConstants.captureTimeout);
+    } on TimeoutException catch (e) {
+      _reply = null;
+      discard();
+      process.kill(ProcessSignal.sigkill);
+      throw _cameraError('CAMERA_TIMEOUT', e);
+    } on AppException {
+      discard();
+      rethrow;
+    }
+    if (msg.kind != 'captured') {
+      discard();
+      throw _cameraError(
+        'CAMERA_FAILED',
+        utf8.decode(msg.payload, allowMalformed: true),
+      );
+    }
+    final raw = await RealSenseCameraService.validateOutput(
+      rgb,
+      depth,
+      meta,
+      stderr: _stderrTail.join('\n'),
+    );
+    Log.i(
+      'realsense capture: ${utf8.decode(msg.payload, allowMalformed: true)}',
+    );
+    return raw;
+  }
+
+  @override
+  Future<void> close() async {
+    if (_closing) return;
+    _closing = true;
+    _readyTimer?.cancel();
+    final process = _process;
+    if (process != null) {
+      try {
+        process.stdin.writeln('{"cmd": "quit"}');
+        await process.stdin.flush();
+        await process.stdin.close();
+      } catch (_) {}
+      var code = await process.exitCode.timeout(
+        const Duration(seconds: 3),
+        onTimeout: () => -1,
+      );
+      if (code == -1) {
+        process.kill(ProcessSignal.sigkill);
+        code = await process.exitCode.timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => -1,
+        );
+      }
+    }
+    if (!_ready.isCompleted) {
+      _ready.completeError(
+        const AppException(
+          AppErrorType.localValidation,
+          '已取消',
+          code: 'CAMERA_CLOSED',
+        ),
+      );
+    }
+    final reply = _reply;
+    _reply = null;
+    if (reply != null && !reply.isCompleted) {
+      reply.completeError(
+        const AppException(
+          AppErrorType.localValidation,
+          '已取消',
+          code: 'CAMERA_CLOSED',
+        ),
+      );
+    }
+    if (!_frames.isClosed) await _frames.close();
+  }
 }
 
 /// image_picker:Android / iOS 開相機,桌面平台為選擇檔案 (開發用)。
@@ -456,6 +793,12 @@ class MockCameraService extends CameraService {
   @override
   String get description =>
       '模擬相機 (${width}x$height${withDepth ? ', RGB-D' : ''})';
+
+  @override
+  bool get supportsPreview => true;
+
+  @override
+  CameraPreview openPreview() => MockCameraPreview(this);
 
   @override
   Future<RawCapture?> capture(String outputPath) async {
@@ -614,5 +957,60 @@ class MockCameraService extends CameraService {
     }
     img.noise(image, 6, random: math.Random(seed));
     return image;
+  }
+}
+
+/// 模擬相機的預覽:固定間隔送同一張合成畫面,快門時交給 [MockCameraService.capture]。
+class MockCameraPreview extends CameraPreview {
+  MockCameraPreview(
+    this._camera, {
+    Duration interval = const Duration(milliseconds: 100),
+  }) {
+    _jpeg = Uint8List.fromList(
+      img.encodeJpg(
+        MockCameraService.render(
+          math.max(16, _camera.width ~/ 2),
+          math.max(12, _camera.height ~/ 2),
+          withTray: _camera.withTray,
+          seed: _camera.seed,
+        ),
+        quality: 70,
+      ),
+    );
+    _timer = Timer.periodic(interval, (_) {
+      if (_frames.isClosed) return;
+      frameCount++;
+      _frames.add(_jpeg);
+    });
+  }
+
+  final MockCameraService _camera;
+  final _frames = StreamController<Uint8List>.broadcast();
+  late final Uint8List _jpeg;
+  late final Timer _timer;
+
+  /// 送出過的影格數 (測試用)。
+  int frameCount = 0;
+  bool closed = false;
+
+  @override
+  Stream<Uint8List> get frames => _frames.stream;
+
+  @override
+  Future<void> get ready => Future.value();
+
+  @override
+  Future<RawCapture?> capture(String outputPath) async {
+    if (closed) {
+      throw _cameraError('CAMERA_FAILED', 'preview closed');
+    }
+    return _camera.capture(outputPath);
+  }
+
+  @override
+  Future<void> close() async {
+    closed = true;
+    _timer.cancel();
+    if (!_frames.isClosed) await _frames.close();
   }
 }

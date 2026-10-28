@@ -18,6 +18,7 @@ import '../data/models/offline_queue_item.dart';
 import '../data/models/weight_reading.dart';
 import 'connectivity_service.dart';
 import 'error_handling_service.dart';
+import 'hardware/camera_service.dart';
 import 'hardware/hardware_service.dart';
 import 'local_storage_service.dart';
 import 'offline_queue_service.dart';
@@ -50,9 +51,17 @@ class RecordService {
   final HardwareService _hardware;
 
   /// 拍照 (擷取 → 壓縮 → 品質檢查) 並同時讀秤。使用者取消時回傳 null。
+  /// [via] 為拍照畫面已開著的預覽串流時,從它拍。
   Future<CaptureResult?> capture({
     CaptureMethod method = CaptureMethod.camera,
-  }) => _hardware.capture(method: method);
+    CaptureSource? via,
+  }) => _hardware.capture(method: method, via: via);
+
+  /// 相機能即時預覽 (拍照畫面)。
+  bool get previewSupported => _hardware.previewSupported;
+
+  /// 開預覽串流 (用完要 [CameraPreview.close])。
+  CameraPreview openPreview() => _hardware.openPreview();
 
   /// 重新秤重 (不重拍)。
   Future<WeightReading?> readWeight() => _hardware.readWeight();

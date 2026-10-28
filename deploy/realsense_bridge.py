@@ -9,15 +9,30 @@
   realsense_bridge.py --probe                       偵測相機:stdout 印 JSON (序號 / 韌體 / USB),找不到回 2
   realsense_bridge.py --once RGB.jpg DEPTH.png META.json [--width 1280 --height 720] [--warmup 15]
                       [--serial <序號>] [--timeout 10]
+  realsense_bridge.py --preview [--width 1280 --height 720] [--serial <序號>]
+                      [--preview-fps 10] [--preview-width 640]
+                      即時預覽 (App 的拍照畫面):stdout 連續送出縮小的 JPEG 影格,stdin 收指令拍照
   realsense_bridge.py --mock --once ...             沒有相機時產生合成餐盒 RGB-D (測 App 串接用)
   realsense_bridge.py --mock --probe                假裝找到一台相機
+  realsense_bridge.py --mock --preview              沒有相機時用合成畫面預覽
+
+--preview 的通訊格式:
+  stdout (二進位):每則訊息是一行「<kind> <bytes>\n」接著 bytes 個 byte 的內容
+    ready     JSON   串流已啟動:serial / name / usb_type / width / height / fps
+    frame     JPEG   預覽影格 (寬 --preview-width,每秒 --preview-fps 張)
+    captured  JSON   拍照完成:serial / width / height / depth_valid_ratio
+    error     文字   拍照失敗 (串流繼續,可再按一次)
+  stdin (每行一個 JSON):
+    {"cmd": "capture", "rgb": "x.jpg", "depth": "x_depth.png", "meta": "x_depth.json"}   用目前影格拍一張
+    {"cmd": "quit"}                                                                        結束
+  stdin 被關掉 (App 結束) 時程式自己退出。
 
 輸出格式 (ARCHITECTURE.md §5.1,PROGRESS.md):
   RGB   : JPEG (品質 92),彩色相機原始解析度
   DEPTH : 16-bit 灰階 PNG,單位 mm,已對齊到彩色影像、同解析度;0 = 沒有深度資料
   META  : JSON,含 serial、彩色內參 (fx fy ppx ppy)、depth_unit_m (PNG 數值 × 此值 = 公尺)
 
-結束碼:0 成功;1 參數錯誤或 pyrealsense2 沒裝;2 找不到相機;3 擷取失敗 / 逾時。
+結束碼:0 成功;1 參數錯誤或 pyrealsense2 沒裝;2 找不到相機;3 擷取失敗 / 逾時 / 預覽中串流中斷。
 
 安裝相依 (Raspberry Pi 5 / Pi OS Bookworm):
   sudo apt install python3-numpy python3-opencv      (或 python3-pil;兩者擇一即可)
@@ -27,8 +42,11 @@ Ubuntu x86_64 開發機:pip install pyrealsense2 numpy opencv-python-headless
 from __future__ import annotations
 
 import argparse
+import io
 import json
+import queue
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +103,35 @@ def write_meta(meta: dict, meta_path: Path) -> None:
     tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
     tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2))
     tmp.replace(meta_path)
+
+
+def encode_jpeg(rgb, quality: int = 70) -> bytes:
+    """預覽影格:HxWx3 uint8 (RGB) → JPEG bytes。優先 OpenCV,沒有就用 Pillow。"""
+    np = _import_np()
+    rgb = np.ascontiguousarray(rgb)
+    try:
+        import cv2
+
+        ok, buf = cv2.imencode(".jpg", rgb[:, :, ::-1], [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        if not ok:
+            raise RuntimeError("cv2.imencode 失敗")
+        return buf.tobytes()
+    except ImportError:
+        pass
+    try:
+        from PIL import Image
+    except ImportError:
+        log("需要 python3-opencv 或 python3-pil 其中之一才能編碼 JPEG")
+        sys.exit(EXIT_USAGE)
+    out = io.BytesIO()
+    Image.fromarray(rgb).save(out, "JPEG", quality=quality)
+    return out.getvalue()
+
+
+def downscale(rgb, max_width: int):
+    """預覽不需要全解析度:整數倍抽樣到寬度不超過 max_width。"""
+    step = max(1, rgb.shape[1] // max(1, max_width))
+    return rgb[::step, ::step]
 
 
 # ---------------------------------------------------------------- 真相機
@@ -148,6 +195,78 @@ def probe(args) -> int:
     return 0
 
 
+def start_pipeline(rs, serial: str | None, width: int, height: int):
+    """啟動彩色 + 深度串流;USB 2 線材 / 埠時 1280x720@30 開不起來,往下試較低 fps。"""
+    pipeline = rs.pipeline()
+    last_error: Exception | None = None
+    for fps in (30, 15, 6):
+        cfg = rs.config()
+        if serial:
+            cfg.enable_device(serial)
+        cfg.enable_stream(rs.stream.color, width, height, rs.format.rgb8, fps)
+        cfg.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
+        try:
+            if not cfg.can_resolve(rs.pipeline_wrapper(pipeline)):
+                last_error = RuntimeError(f"{width}x{height}@{fps} 不支援")
+                continue
+            return pipeline, pipeline.start(cfg)
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            continue
+    raise RuntimeError(f"無法啟動串流:{last_error}")
+
+
+def snapshot(rs, np, frames, align, depth_scale: float, info: dict, warmup: int):
+    """一組影格 → (rgb, depth_mm, meta):深度對齊到彩色、換算成 mm。"""
+    frames = align.process(frames)
+    color = frames.get_color_frame()
+    depth = frames.get_depth_frame()
+    if not color or not depth:
+        raise RuntimeError("沒有拿到完整的彩色 + 深度影格")
+
+    rgb = np.asanyarray(color.get_data()).copy()
+    raw = np.asanyarray(depth.get_data())
+    factor = depth_scale * 1000.0
+    if abs(factor - 1.0) < 1e-9:
+        depth_mm = raw.astype(np.uint16, copy=True)
+    else:
+        depth_mm = np.clip(np.rint(raw.astype(np.float32) * factor), 0, 65535).astype(np.uint16)
+    if rgb.shape[:2] != depth_mm.shape[:2]:
+        raise RuntimeError(f"對齊後尺寸不一致:rgb {rgb.shape[:2]} depth {depth_mm.shape[:2]}")
+
+    intr = color.profile.as_video_stream_profile().intrinsics
+    meta = {
+        "format": FORMAT,
+        "mock": False,
+        **info,
+        "librealsense": _rs_version(rs),
+        "width": int(intr.width),
+        "height": int(intr.height),
+        "depth_unit_m": 0.001,
+        "depth_aligned_to": "color",
+        "device_depth_scale": depth_scale,
+        "intrinsics": {
+            "fx": float(intr.fx),
+            "fy": float(intr.fy),
+            "ppx": float(intr.ppx),
+            "ppy": float(intr.ppy),
+            "model": str(intr.model).split(".")[-1],
+            "coeffs": [float(c) for c in intr.coeffs],
+        },
+        "frame_number": int(color.get_frame_number()),
+        "timestamp_ms": float(color.get_timestamp()),
+        "fps": int(color.profile.fps()),
+        "warmup_frames": warmup,
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "depth_valid_ratio": round(float(np.count_nonzero(depth_mm)) / depth_mm.size, 4),
+    }
+    return rgb, depth_mm, meta
+
+
+def _summary(meta: dict) -> dict:
+    return {k: meta[k] for k in ("serial", "width", "height", "depth_valid_ratio", "fps")}
+
+
 def capture_real(args, rgb_path: Path, depth_path: Path, meta_path: Path) -> int:
     np = _import_np()
     rs = _import_rs()
@@ -155,91 +274,27 @@ def capture_real(args, rgb_path: Path, depth_path: Path, meta_path: Path) -> int
     if not devices:
         log("找不到 RealSense 相機" + (f" (序號 {args.serial})" if args.serial else "") + ",請確認 USB 3 線已接好")
         return EXIT_NO_DEVICE
-    dev = devices[0]
-    info = describe_device(dev, rs)
-    serial = info["serial"]
+    info = describe_device(devices[0], rs)
 
-    pipeline = rs.pipeline()
-    profile = None
-    last_error: Exception | None = None
-    # USB 2 線材 / 埠時 1280x720@30 開不起來,往下試較低 fps。
-    for fps in (30, 15, 6):
-        cfg = rs.config()
-        if serial:
-            cfg.enable_device(serial)
-        cfg.enable_stream(rs.stream.color, args.width, args.height, rs.format.rgb8, fps)
-        cfg.enable_stream(rs.stream.depth, args.width, args.height, rs.format.z16, fps)
-        try:
-            if not cfg.can_resolve(rs.pipeline_wrapper(pipeline)):
-                last_error = RuntimeError(f"{args.width}x{args.height}@{fps} 不支援")
-                continue
-            profile = pipeline.start(cfg)
-            break
-        except Exception as e:  # noqa: BLE001
-            last_error = e
-            continue
-    if profile is None:
-        log(f"無法啟動串流:{last_error}")
+    try:
+        pipeline, profile = start_pipeline(rs, info["serial"], args.width, args.height)
+    except RuntimeError as e:
+        log(str(e))
         return EXIT_CAPTURE
 
     deadline = time.monotonic() + args.timeout
     try:
-        depth_sensor = profile.get_device().first_depth_sensor()
-        depth_scale = float(depth_sensor.get_depth_scale())
+        depth_scale = float(profile.get_device().first_depth_sensor().get_depth_scale())
         align = rs.align(rs.stream.color)
-
         frames = None
         # 暖機:自動曝光 / 深度自動調整需要幾張才穩定,只保留最後一組。
-        for i in range(args.warmup + 1):
+        for _ in range(args.warmup + 1):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 log("等待影格逾時")
                 return EXIT_CAPTURE
             frames = pipeline.wait_for_frames(int(min(remaining, 5.0) * 1000))
-        frames = align.process(frames)
-        color = frames.get_color_frame()
-        depth = frames.get_depth_frame()
-        if not color or not depth:
-            log("沒有拿到完整的彩色 + 深度影格")
-            return EXIT_CAPTURE
-
-        rgb = np.asanyarray(color.get_data()).copy()
-        raw = np.asanyarray(depth.get_data())
-        factor = depth_scale * 1000.0
-        if abs(factor - 1.0) < 1e-9:
-            depth_mm = raw.astype(np.uint16, copy=True)
-        else:
-            depth_mm = np.clip(np.rint(raw.astype(np.float32) * factor), 0, 65535).astype(np.uint16)
-        if rgb.shape[:2] != depth_mm.shape[:2]:
-            log(f"對齊後尺寸不一致:rgb {rgb.shape[:2]} depth {depth_mm.shape[:2]}")
-            return EXIT_CAPTURE
-
-        intr = color.profile.as_video_stream_profile().intrinsics
-        meta = {
-            "format": FORMAT,
-            "mock": False,
-            **info,
-            "librealsense": _rs_version(rs),
-            "width": int(intr.width),
-            "height": int(intr.height),
-            "depth_unit_m": 0.001,
-            "depth_aligned_to": "color",
-            "device_depth_scale": depth_scale,
-            "intrinsics": {
-                "fx": float(intr.fx),
-                "fy": float(intr.fy),
-                "ppx": float(intr.ppx),
-                "ppy": float(intr.ppy),
-                "model": str(intr.model).split(".")[-1],
-                "coeffs": [float(c) for c in intr.coeffs],
-            },
-            "frame_number": int(color.get_frame_number()),
-            "timestamp_ms": float(color.get_timestamp()),
-            "fps": int(color.profile.fps()),
-            "warmup_frames": args.warmup,
-            "captured_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-            "depth_valid_ratio": round(float(np.count_nonzero(depth_mm)) / depth_mm.size, 4),
-        }
+        rgb, depth_mm, meta = snapshot(rs, np, frames, align, depth_scale, info, args.warmup)
     except Exception as e:  # noqa: BLE001
         log(f"擷取失敗:{e}")
         return EXIT_CAPTURE
@@ -251,8 +306,119 @@ def capture_real(args, rgb_path: Path, depth_path: Path, meta_path: Path) -> int
 
     write_images(rgb, depth_mm, rgb_path, depth_path)
     write_meta(meta, meta_path)
-    print(json.dumps({k: meta[k] for k in ("serial", "width", "height", "depth_valid_ratio", "fps")}))
+    print(json.dumps(_summary(meta)))
     return 0
+
+
+def preview_real(args) -> int:
+    """串流一直開著:stdout 送預覽影格,stdin 收到 capture 時用目前影格拍一張 RGB-D。"""
+    np = _import_np()
+    rs = _import_rs()
+    devices = find_devices(rs, args.serial)
+    if not devices:
+        log("找不到 RealSense 相機" + (f" (序號 {args.serial})" if args.serial else "") + ",請確認 USB 3 線已接好")
+        return EXIT_NO_DEVICE
+    info = describe_device(devices[0], rs)
+    try:
+        pipeline, profile = start_pipeline(rs, info["serial"], args.width, args.height)
+    except RuntimeError as e:
+        log(str(e))
+        return EXIT_CAPTURE
+    try:
+        depth_scale = float(profile.get_device().first_depth_sensor().get_depth_scale())
+        align = rs.align(rs.stream.color)
+        color_profile = profile.get_stream(rs.stream.color).as_video_stream_profile()
+        ready = {**info, "mock": False, "librealsense": _rs_version(rs),
+                 "width": int(color_profile.width()), "height": int(color_profile.height()),
+                 "fps": int(color_profile.fps())}
+        return preview_loop(
+            args,
+            ready,
+            grab=lambda: pipeline.wait_for_frames(2000),
+            to_rgb=lambda frames: np.asanyarray(frames.get_color_frame().get_data()),
+            take=lambda frames: snapshot(rs, np, frames, align, depth_scale, info, 0),
+        )
+    finally:
+        try:
+            pipeline.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------- 預覽 (真相機 / 模擬共用)
+class _Sender:
+    """stdout 的二進位訊息:「<kind> <bytes>\n」+ 內容。"""
+
+    def __init__(self):
+        self._out = sys.stdout.buffer
+        self._lock = threading.Lock()
+
+    def __call__(self, kind: str, payload: bytes) -> None:
+        with self._lock:
+            self._out.write(f"{kind} {len(payload)}\n".encode("ascii"))
+            self._out.write(payload)
+            self._out.flush()
+
+
+def _read_commands(q: "queue.Queue") -> None:
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            q.put(json.loads(line))
+        except ValueError:
+            log(f"指令不是 JSON:{line!r}")
+    q.put(None)  # stdin 關了 (App 結束) → 離開
+
+
+def preview_loop(args, ready: dict, grab, to_rgb, take) -> int:
+    """grab() 取一組影格;to_rgb(frames) 給預覽用的 RGB;take(frames) → (rgb, depth_mm, meta)。"""
+    send = _Sender()
+    commands: "queue.Queue" = queue.Queue()
+    threading.Thread(target=_read_commands, args=(commands,), daemon=True).start()
+    interval = 1.0 / max(1, args.preview_fps)
+    next_frame = 0.0
+    failures = 0
+    try:
+        send("ready", json.dumps(ready, ensure_ascii=False).encode("utf-8"))
+        while True:
+            try:
+                frames = grab()
+                failures = 0
+            except Exception as e:  # noqa: BLE001
+                failures += 1
+                if failures >= 3:
+                    log(f"串流中斷:{e}")
+                    send("error", "相機沒有回應".encode("utf-8"))
+                    return EXIT_CAPTURE
+                continue
+
+            while True:
+                try:
+                    cmd = commands.get_nowait()
+                except queue.Empty:
+                    break
+                if cmd is None or cmd.get("cmd") == "quit":
+                    return 0
+                if cmd.get("cmd") == "capture":
+                    try:
+                        rgb, depth_mm, meta = take(frames)
+                        write_images(rgb, depth_mm, Path(cmd["rgb"]), Path(cmd["depth"]))
+                        write_meta(meta, Path(cmd["meta"]))
+                        send("captured", json.dumps(_summary(meta)).encode("utf-8"))
+                    except Exception as e:  # noqa: BLE001
+                        log(f"擷取失敗:{e}")
+                        send("error", f"擷取失敗:{e}".encode("utf-8"))
+                else:
+                    log(f"不認識的指令:{cmd}")
+
+            now = time.monotonic()
+            if now >= next_frame:
+                next_frame = now + interval
+                send("frame", encode_jpeg(downscale(to_rgb(frames), args.preview_width)))
+    except BrokenPipeError:
+        return 0  # App 已關掉 stdout
 
 
 # ---------------------------------------------------------------- 模擬
@@ -310,11 +476,9 @@ def render_mock(np, width: int, height: int, seed: int = 42):
     return rgb, depth_mm
 
 
-def capture_mock(args, rgb_path: Path, depth_path: Path, meta_path: Path) -> int:
-    np = _import_np()
-    rgb, depth_mm = render_mock(np, args.width, args.height)
+def mock_meta(args, np, depth_mm) -> dict:
     f = args.width * 0.72  # D435 彩色相機 69° 水平視角的近似焦距
-    meta = {
+    return {
         "format": FORMAT,
         "mock": True,
         "serial": "MOCK000000",
@@ -340,10 +504,37 @@ def capture_mock(args, rgb_path: Path, depth_path: Path, meta_path: Path) -> int
         "captured_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         "depth_valid_ratio": round(float(np.count_nonzero(depth_mm)) / depth_mm.size, 4),
     }
+
+
+def capture_mock(args, rgb_path: Path, depth_path: Path, meta_path: Path) -> int:
+    np = _import_np()
+    rgb, depth_mm = render_mock(np, args.width, args.height)
+    meta = mock_meta(args, np, depth_mm)
     write_images(rgb, depth_mm, rgb_path, depth_path)
     write_meta(meta, meta_path)
-    print(json.dumps({k: meta[k] for k in ("serial", "width", "height", "depth_valid_ratio", "fps")}))
+    print(json.dumps(_summary(meta)))
     return 0
+
+
+def preview_mock(args) -> int:
+    np = _import_np()
+    rgb, depth_mm = render_mock(np, args.width, args.height)
+    rnd = np.random.default_rng(1)
+    ready = {"serial": "MOCK000000", "name": "Intel RealSense D435f (mock)", "firmware": None,
+             "usb_type": None, "product_line": "D400", "mock": True,
+             "width": args.width, "height": args.height, "fps": 30}
+
+    def grab():
+        time.sleep(1.0 / 30)
+        return None
+
+    def to_rgb(_):
+        # 每張加一點雜訊,畫面看得出是活的
+        noise = rnd.integers(-8, 9, rgb.shape)
+        return np.clip(rgb.astype(np.int16) + noise, 0, 255).astype(np.uint8)
+
+    return preview_loop(args, ready, grab=grab, to_rgb=to_rgb,
+                        take=lambda _: (rgb, depth_mm, mock_meta(args, np, depth_mm)))
 
 
 # ---------------------------------------------------------------- main
@@ -352,12 +543,15 @@ def main(argv: list[str] | None = None) -> int:
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument("--probe", action="store_true", help="偵測相機並印出 JSON")
     mode.add_argument("--once", nargs=3, metavar=("RGB", "DEPTH", "META"), help="拍一張 RGB-D 寫到三個檔案")
+    mode.add_argument("--preview", action="store_true", help="即時預覽:stdout 送影格,stdin 收拍照指令")
     ap.add_argument("--width", type=int, default=1280)
     ap.add_argument("--height", type=int, default=720)
     ap.add_argument("--warmup", type=int, default=15, help="丟掉的暖機影格數 (自動曝光收斂)")
     ap.add_argument("--serial", help="指定相機序號 (接多台時)")
     ap.add_argument("--timeout", type=float, default=10.0, help="等待影格的總秒數")
     ap.add_argument("--mock", action="store_true", help="不用相機,輸出合成 RGB-D")
+    ap.add_argument("--preview-fps", type=int, default=10, help="預覽影格每秒張數")
+    ap.add_argument("--preview-width", type=int, default=640, help="預覽影格寬度 (整數倍縮小)")
     args = ap.parse_args(argv)
 
     if (args.width, args.height) not in SUPPORTED:
@@ -373,6 +567,9 @@ def main(argv: list[str] | None = None) -> int:
                               "devices": []}))
             return 0
         return probe(args)
+
+    if args.preview:
+        return preview_mock(args) if args.mock else preview_real(args)
 
     rgb_path, depth_path, meta_path = (Path(p) for p in args.once)
     if args.mock:

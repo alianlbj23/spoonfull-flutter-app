@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `build-librealsense.sh` | 機台 (Pi),一般使用者 | 新機台第一次,裝相機驅動 (librealsense + pyrealsense2)。約 30–45 分鐘 | `./deploy/build-librealsense.sh`<br>選項:`--version v2.56.3` 指定 librealsense 版本、`--jobs 2` 減少同時編譯數 (記憶體小的 Pi)、`--dir ~/librealsense` 原始碼放哪 |
 | `install-device.sh` | 機台,`sudo` | 新機台第一次;之後要更新 kiosk 服務或 bridge 再跑一次 (App 不會被覆蓋) | `sudo ./deploy/install-device.sh --user <登入帳號>`<br>選項:`--autostart` 開機自動全螢幕啟動 App (預設不會,且會把之前 enable 過的關掉)、`--hx711` 同時裝 HX711 GPIO 秤的服務、`--skip-download` 不下載 Release (用自己 `flutter build` 放進 `/opt/spoonfull` 的版本)。環境變數 `SPOONFULL_RELEASE_URL` 可改下載來源 |
-| `realsense_bridge.py` | 機台或開發電腦 | 不用手動跑,App 拍照時會自己呼叫。手動只用來檢查相機 | `python3 deploy/realsense_bridge.py --probe` 偵測相機 (找不到結束碼 2)<br>`python3 deploy/realsense_bridge.py --once a.jpg a_depth.png a.json` 拍一張 RGB-D<br>加 `--mock` 沒相機也會產生合成影像;`--serial <序號>` 指定相機;`--width 640 --height 480` 改解析度 |
+| `realsense_bridge.py` | 機台或開發電腦 | 不用手動跑,App 拍照時會自己呼叫 (拍照畫面的即時預覽與快門都是它)。手動只用來檢查相機 | `python3 deploy/realsense_bridge.py --probe` 偵測相機 (找不到結束碼 2)<br>`python3 deploy/realsense_bridge.py --once a.jpg a_depth.png a.json` 拍一張 RGB-D<br>`python3 deploy/realsense_bridge.py --preview > /dev/null` 開串流 (App 用;手動跑只用來確認相機開得起來,Ctrl-C 結束)<br>加 `--mock` 沒相機也會產生合成影像;`--serial <序號>` 指定相機;`--width 640 --height 480` 改解析度 |
 | `hx711_bridge.py` | 機台 | HX711 直接接 GPIO 時。先校正一次,之後由 `spoonfull-hx711.service` 開機自動跑 | 校正:`python3 /opt/spoonfull/hx711_bridge.py --calibrate 500` (放 500 g 砝碼,照提示按 Enter)<br>看讀數:`python3 /opt/spoonfull/hx711_bridge.py --print`<br>電腦上測假資料:`--fake`;腳位 `--dout 5 --sck 6` (BCM) |
 | `spoonfull-recover.sh` | 機台,自動 | 不用手動跑。開機服務每次啟動 App 前會執行,新版啟動失敗時換回上一版 (§5) | 手動強制還原上一版:`sh /opt/spoonfull/spoonfull-recover.sh /opt/spoonfull` |
 | `spoonfull-kiosk.service` | 機台 | 由 `install-device.sh` 安裝,不用手動複製。預設不會開機自動啟動 | 開 App:`sudo systemctl start spoonfull-kiosk`;關掉:`sudo systemctl stop spoonfull-kiosk`;看狀態:`systemctl status spoonfull-kiosk`;看 log:`journalctl -u spoonfull-kiosk -f`<br>開機自動啟動:`sudo systemctl enable spoonfull-kiosk`;取消:`sudo systemctl disable --now spoonfull-kiosk` |
@@ -108,7 +108,7 @@ python3 /opt/spoonfull/realsense_bridge.py --once /tmp/a.jpg /tmp/a_depth.png /t
 ## 4. 驗證
 
 1. 硬體設定頁:「偵測相機」→ 顯示 D435f 序號與 USB 3;「測試拍照」→ 看到照片、品質指標與「深度:有效 xx%,中央 yy cm」;「即時讀數」→ 秤的數字會動,放上重物後穩定圖示變綠。
-2. 走一次流程:選病房 → 床位 → 餐前 → 放餐盒 → 下一步。畫面顯示「拍照與秤重中」,接著確認頁左下角出現重量 (來源「秤」),右側選時段膳食 → 上傳。
+2. 走一次流程:選病房 → 床位 → 餐前 → 放餐盒 → 拍照。會先出現相機的即時畫面 (1–2 秒內),按右邊的圓形快門 → 畫面顯示「拍照與秤重中」,接著確認頁左下角出現重量 (來源「秤」),右側選時段膳食 → 上傳。拔掉相機 USB 線再按拍照 → 畫面應顯示找不到相機與「重試」鈕,插回去按重試會恢復。
 3. server 端確認 `FoodIntake` 有 `weight_g`、`client_record_id`、`captured_at`,`edge_result` 有 `quality_check` 與 `depth_attached: true`,而且收到 `depth` (PNG) 與 `depth_meta` 兩個欄位。
 4. 拔網路線上傳一筆 → 顯示離線排隊;插回去自動送出,server 只會有一筆 (去重鍵 `client_record_id`)。
 

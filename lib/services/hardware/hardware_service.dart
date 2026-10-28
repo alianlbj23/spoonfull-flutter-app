@@ -112,6 +112,12 @@ class HardwareService {
     return cam is! ImagePickerCameraService || cam.opensCamera;
   }
 
+  /// 設定的相機能即時預覽 (拍照畫面先顯示畫面,按快門才拍)。
+  bool get previewSupported => camera.supportsPreview;
+
+  /// 開預覽串流;拍照時把它當 [capture] 的 `via` 傳入,用完要 [CameraPreview.close]。
+  CameraPreview openPreview() => camera.openPreview();
+
   /// 偵測 RealSense 相機 (硬體設定頁)。相機來源不是 RealSense 時回 null。
   Future<RealSenseInfo?> probeCamera() async {
     final cam = camera;
@@ -145,18 +151,20 @@ class HardwareService {
       p.join((await imagesDirectory()).path, '${const Uuid().v4()}.jpg');
 
   /// 拍照 (擷取 → 縮放壓縮 → 品質檢查) 並同時讀秤。
-  /// [method] 為 [CaptureMethod.file] 時改由使用者選擇圖片檔案,後續處理相同。
+  /// [method] 為 [CaptureMethod.file] 時改由使用者選擇圖片檔案,後續處理相同;
+  /// [via] 有給時 (拍照畫面的預覽串流) 就從它拍,不另外開相機。
   /// 使用者取消拍照時回 null。
   Future<CaptureResult?> capture({
     bool readWeight = true,
     CaptureMethod method = CaptureMethod.camera,
+    CaptureSource? via,
   }) async {
     final weightFuture = readWeight && scale.enabled
         ? _readWeightSafely()
         : Future.value(const _WeightOutcome(null, null));
 
     final target = await _newImagePath();
-    final source = method == CaptureMethod.file ? filePicker : camera;
+    final source = via ?? (method == CaptureMethod.file ? filePicker : camera);
     final RawCapture? raw;
     try {
       raw = await source.capture('$target.raw');

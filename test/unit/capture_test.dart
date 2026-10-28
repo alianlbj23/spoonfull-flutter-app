@@ -126,6 +126,24 @@ void main() {
       await rgbd.services.sync.refreshCache(force: true);
     });
 
+    test('capture through the preview stream keeps the depth', () async {
+      final records = rgbd.services.records;
+      expect(records.previewSupported, isTrue);
+      final preview = records.openPreview() as MockCameraPreview;
+      await preview.ready;
+      final frame = await preview.frames.first;
+      expect(frame.sublist(0, 2), [0xff, 0xd8], reason: '預覽影格是 JPEG');
+
+      final result = (await records.capture(via: preview))!;
+      expect(result.hasDepth, isTrue);
+      expect(File(result.depthPath!).existsSync(), isTrue);
+      expect(result.weight, isNotNull);
+
+      await preview.close();
+      expect(preview.closed, isTrue);
+      await expectLater(preview.capture('x'), throwsA(isA<AppException>()));
+    });
+
     tearDown(() => rgbd.dispose());
 
     Future<UploadOutcome> uploadRgbd(CaptureResult c) async {
