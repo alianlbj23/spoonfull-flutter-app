@@ -112,7 +112,7 @@ enum ScaleKind {
   /// 序列埠秤或 HX711 + 微控制器,每行一個數值 (如 "ST,GS,  123.4 g")。
   serial('序列埠 / HX711 (USB)'),
 
-  /// 本機 TCP 文字串流 (HX711 直接接 GPIO 時由 deploy/hx711_bridge.py 提供)。
+  /// 本機 TCP 文字串流 (HX711 直接接 GPIO 時由 deploy/spoonfull.py 的 hx711-bridge 服務提供)。
   tcp('HX711 (GPIO bridge)'),
 
   /// 模擬秤,開發與測試用。

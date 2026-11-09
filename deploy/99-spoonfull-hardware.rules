@@ -1,9 +1,0 @@
-# Spoonfull 機台硬體權限 (ARCHITECTURE.md §5.1)
-# USB HID 秤 (USB HID POS Scale,usage page 0x8D):讓 App 可以直接讀 /dev/hidrawN
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", MODE="0660", GROUP="plugdev", TAG+="uaccess"
-# 序列埠秤 / HX711 微控制器 (USB serial)
-KERNEL=="ttyUSB*", MODE="0660", GROUP="dialout"
-KERNEL=="ttyACM*", MODE="0660", GROUP="dialout"
-# Intel RealSense D435f (USB,vendor 8086、D400 系列 product 0bxx):realsense_bridge.py 用 libusb 直接開。
-# deploy/build-librealsense.sh 另外會裝 librealsense 自己的 99-realsense-libusb.rules,這條是保險。
-SUBSYSTEM=="usb", ATTRS{idVendor}=="8086", ATTRS{idProduct}=="0b[0-9a-f][0-9a-f]", MODE="0660", GROUP="plugdev", TAG+="uaccess"

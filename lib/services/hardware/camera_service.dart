@@ -215,7 +215,7 @@ class RealSenseCameraService extends CameraService {
   /// bridge 的檔名;隨 App 一起發佈 (pubspec assets),也可裝在 /opt/spoonfull。
   static const bridgeFileName = 'realsense_bridge.py';
 
-  /// 機台安裝路徑 (deploy/install-device.sh)。
+  /// 機台安裝路徑 (deploy/spoonfull.py 的「安裝 / 更新機台」)。
   static const installedBridgePath = '/opt/spoonfull/$bridgeFileName';
 
   String get python => _pythonOverride ?? _env['SPOONFULL_PYTHON'] ?? 'python3';

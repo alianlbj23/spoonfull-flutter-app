@@ -2,18 +2,35 @@
 
 對應 [ARCHITECTURE.md](../ARCHITECTURE.md) §5 與 §11 階段 5。機台只做採集:拍照、秤重、品質檢查、上傳,不跑任何 AI。
 
-## 0. 這個資料夾裡每個檔案怎麼用
+## 0. 只要記一個指令
 
-| 檔案 | 在哪裡跑 | 什麼時候跑 | 指令 |
-|---|---|---|---|
-| `build-librealsense.sh` | 機台 (Pi),一般使用者 | 新機台第一次,裝相機驅動 (librealsense + pyrealsense2)。約 30–45 分鐘 | `./deploy/build-librealsense.sh`<br>選項:`--version v2.56.3` 指定 librealsense 版本、`--jobs 2` 減少同時編譯數 (記憶體小的 Pi)、`--dir ~/librealsense` 原始碼放哪 |
-| `install-device.sh` | 機台,`sudo` | 新機台第一次;之後要更新 kiosk 服務或 bridge 再跑一次 (App 不會被覆蓋) | `sudo ./deploy/install-device.sh --user <登入帳號>`<br>選項:`--autostart` 開機自動全螢幕啟動 App (預設不會,且會把之前 enable 過的關掉)、`--hx711` 同時裝 HX711 GPIO 秤的服務、`--skip-download` 不下載 Release (用自己 `flutter build` 放進 `/opt/spoonfull` 的版本)。環境變數 `SPOONFULL_RELEASE_URL` 可改下載來源 |
-| `realsense_bridge.py` | 機台或開發電腦 | 不用手動跑,App 拍照時會自己呼叫 (拍照畫面的即時預覽與快門都是它)。手動只用來檢查相機 | `python3 deploy/realsense_bridge.py --probe` 偵測相機 (找不到結束碼 2)<br>`python3 deploy/realsense_bridge.py --once a.jpg a_depth.png a.json` 拍一張 RGB-D<br>`python3 deploy/realsense_bridge.py --preview > /dev/null` 開串流 (App 用;手動跑只用來確認相機開得起來,Ctrl-C 結束)<br>加 `--mock` 沒相機也會產生合成影像;`--serial <序號>` 指定相機;`--width 640 --height 480` 改解析度 |
-| `hx711_bridge.py` | 機台 | HX711 直接接 GPIO 時。先校正一次,之後由 `spoonfull-hx711.service` 開機自動跑 | 校正:`python3 /opt/spoonfull/hx711_bridge.py --calibrate 500` (放 500 g 砝碼,照提示按 Enter)<br>看讀數:`python3 /opt/spoonfull/hx711_bridge.py --print`<br>電腦上測假資料:`--fake`;腳位 `--dout 5 --sck 6` (BCM) |
-| `spoonfull-recover.sh` | 機台,自動 | 不用手動跑。開機服務每次啟動 App 前會執行,新版啟動失敗時換回上一版 (§5) | 手動強制還原上一版:`sh /opt/spoonfull/spoonfull-recover.sh /opt/spoonfull` |
-| `spoonfull-kiosk.service` | 機台 | 由 `install-device.sh` 安裝,不用手動複製。預設不會開機自動啟動 | 開 App:`sudo systemctl start spoonfull-kiosk`;關掉:`sudo systemctl stop spoonfull-kiosk`;看狀態:`systemctl status spoonfull-kiosk`;看 log:`journalctl -u spoonfull-kiosk -f`<br>開機自動啟動:`sudo systemctl enable spoonfull-kiosk`;取消:`sudo systemctl disable --now spoonfull-kiosk` |
-| `spoonfull-hx711.service` | 機台 | 由 `install-device.sh --hx711` 安裝 | `systemctl status spoonfull-hx711`;看輸出:`nc 127.0.0.1 9100` |
-| `99-spoonfull-hardware.rules` | 機台 | 由 `install-device.sh` 安裝到 `/etc/udev/rules.d/`。改過後重載:`sudo udevadm control --reload-rules && sudo udevadm trigger` | 讓一般使用者能開 RealSense (USB)、USB HID 秤 (`/dev/hidraw*`)、序列埠秤 (`/dev/ttyUSB*`) |
+```bash
+python3 deploy/spoonfull.py              # 在專案資料夾 (第一次安裝用這個)
+python3 /opt/spoonfull/spoonfull.py      # 安裝後在任何地方都可以
+```
+
+用**一般使用者**執行 (不要加 `sudo`),需要權限的步驟程式會自己呼叫 sudo。畫面會列出目前 App 是否執行中、開機是否自動啟動,輸入數字選項即可:
+
+| 主選單 | 做什麼 |
+|---|---|
+| 1 安裝 / 更新機台 | 新機台第一次;之後要更新服務或 bridge 再跑一次 (App 不會被覆蓋)。會依序問:執行 App 的帳號、開機要不要自動啟動 App、HX711 是否直接接 GPIO、(沒有 App 時) 要不要下載最新版,確認後安裝套件、udev 權限、NTP、App、kiosk 服務 |
+| 2 開啟 App / 3 關閉 App | 全螢幕 kiosk 服務 |
+| 4 開機自動啟動 App | 依目前狀態問要開還是關 |
+| 5 查看 App 狀態與 log | 服務狀態、最近 50 行 log,可選擇持續看 (Ctrl-C 結束) |
+| 6 相機 | 偵測相機 (序號 / 韌體 / USB)、拍一張測試照 (深度有效比例與距離)、相機校正 (見 §3)、編譯相機驅動。App 開著時會先問要不要關掉讓出相機 |
+| 7 HX711 秤 | 校正 (放已知重量的砝碼)、看即時讀數、設定腳位、開機服務狀態、假資料測試。開機服務在跑時會先暫停、做完再開回來。設定存在執行 App 那個帳號的 `~/.config/spoonfull/hx711.json`,所以要用**那個帳號**登入操作 (用別的帳號會被擋下並提示) |
+| 8 還原上一版 App | 自動更新後新版有問題時;只有「更新中斷」或「新版還沒確認正常」時才有舊版可以換回 (§5)。換回後會把那一版記成壞版本,App 不會再自動裝它 |
+
+這個資料夾裡的其他檔案,平常不用直接執行:
+
+| 檔案 | 用途 |
+|---|---|
+| `spoonfull.py` | 上面的選單。也是 HX711 開機服務本身 (服務以 `spoonfull.py hx711-bridge` 執行,不用手動跑)。kiosk / HX711 服務與 udev 規則的內容都寫在這個檔案裡 |
+| `realsense_bridge.py` | App 拍照時自己呼叫 (即時預覽與快門)。手動檢查請用選單「相機」;要直接跑:`--probe` 偵測、`--once a.jpg a_depth.png a.json` 拍一張、`--mock` 沒相機時產生合成影像 |
+| `realsense_tool.py` | 相機校正,從選單「相機 → 相機校正」進入 (§3) |
+| `build-librealsense.sh` | 編譯相機驅動,從選單「相機 → 編譯 / 安裝相機驅動」執行 |
+| `spoonfull-recover.sh` | 自動更新的退路。kiosk 服務每次啟動 App 前自動執行,CI 也會打包進 Release (§5) |
+| `tests/` | `python3 -m unittest discover -s deploy/tests -v` (不需要硬體) |
 
 ## 1. 安裝到機台 (Raspberry Pi 5,Pi OS Bookworm 64-bit)
 
@@ -24,33 +41,26 @@
    git clone https://github.com/alianlbj23/spoonfull-flutter-app.git
    cd spoonfull-flutter-app
    ```
-2. 編相機驅動(只需一次,約 30–45 分鐘;以一般使用者執行,會自己呼叫 sudo):
+2. 開選單:
    ```bash
-   ./deploy/build-librealsense.sh
+   python3 deploy/spoonfull.py
    ```
-   跑完接上相機確認:
-   ```bash
-   rs-enumerate-devices                                   # 列出 D435f
-   python3 deploy/realsense_bridge.py --probe             # 印出序號、韌體、USB 3.x (不要用 rs.__version__ 檢查,pip 版沒有)
-   ```
-   腳本最後會在 `~/librealsense/build/` 產出 `librealsense2-*.deb`,留著給下一台機台 `sudo dpkg -i`,就不用再編。
-3. 安裝 App 與 kiosk 服務:
-   ```bash
-   sudo ./deploy/install-device.sh --user <登入帳號> [--autostart] [--hx711]
-   ```
-   會從 GitHub Release 下載最新版到 `/opt/spoonfull`、設定裝置權限與 NTP、裝全螢幕 kiosk 服務。**一定要用 Release 的版本**,只有它會自動更新(見 §5)。
-   預設**不會**開機自動啟動 App;正式上線的機台要自動啟動再加 `--autostart`(或之後 `sudo systemctl enable spoonfull-kiosk`)。
-4. 重新登入(讓群組權限生效),再開 App:
-   ```bash
-   sudo systemctl start spoonfull-kiosk     # 關掉:sudo systemctl stop spoonfull-kiosk
-   ```
-5. App 裡:設定 → 硬體設定 → 相機來源 **RealSense D435f (RGB-D)**(Linux 預設已選)→ **偵測相機** → **測試拍照** → 看到照片與「深度:有效 xx%,中央 yy cm」→ 選秤的類型(§3)→ **儲存**。
+3. **相機 → 編譯 / 安裝相機驅動**(只需一次,約 30–45 分鐘)。最後會在 `~/librealsense/build/` 產出 `librealsense2-*.deb`,留著給下一台機台 `sudo dpkg -i`,就不用再編。
+4. 回主選單 **1 安裝 / 更新機台**,照提示回答 (Enter = 括號裡的預設值):
+   - 執行 App 的帳號:直接 Enter 用目前登入的帳號;
+   - 開機自動啟動 App:正式上線的機台選 `y`,測試中的機台 Enter (不自動啟動);
+   - HX711 直接接 GPIO:有才選 `y` (會裝開機服務,並問要不要馬上校正);
+   - 沒有 App 時會問要不要從 GitHub Release 下載最新版:Enter (下載)。**一定要用 Release 的版本**,只有它會自動更新(見 §5)。
+5. 重新登入(讓群組權限生效),再開選單:**相機 → 偵測相機** 應印出序號、韌體、USB 3.x;然後主選單 **2 開啟 App**。
+6. App 裡:設定 → 硬體設定 → 相機來源 **RealSense D435f (RGB-D)**(Linux 預設已選)→ **偵測相機** → **測試拍照** → 看到照片與「深度:有效 xx%,中央 yy cm」→ 選秤的類型(§3)→ **儲存**。
 
-> 已經在跑的機台,重跑一次 `install-device.sh` 會更新 kiosk 服務與 bridge,App 本身不會被覆蓋。注意沒加 `--autostart` 的話會把開機自動啟動關掉。
+> 已經在跑的機台,重跑一次「安裝 / 更新機台」會更新 kiosk 服務與 bridge,App 本身不會被覆蓋。開機自動啟動那題回答 Enter (否) 的話,會把開機自動啟動關掉。
+>
+> 從舊版 `install-device.sh` 裝的機台:重跑一次「安裝 / 更新機台」(HX711 那題照實回答),HX711 開機服務才會改用 `spoonfull.py`。`/opt/spoonfull/hx711_bridge.py` 之後用不到,可以自己刪掉。
 
 ### Raspberry Pi 4 也可以
 
-同樣步驟,差別:要 64-bit Pi OS;第 2 步編譯約 1–1.5 小時,2 GB 記憶體的型號先加 swap 並用 `./deploy/build-librealsense.sh --jobs 2`(或直接拿 Pi 5 編好的 .deb);電源用官方 3 A;相機一樣接藍色 USB 3 埠。
+同樣步驟,差別:要 64-bit Pi OS;編相機驅動約 1–1.5 小時,2 GB 記憶體的型號先加 swap,並在「是記憶體 2 GB 以下的 Pi 嗎?」回答 `y`(或直接拿 Pi 5 編好的 .deb);電源用官方 3 A;相機一樣接藍色 USB 3 埠。
 
 ## 2. 自己編譯(開發用)
 
@@ -63,7 +73,7 @@ flutter config --enable-linux-desktop
 flutter build linux --release
 sudo mkdir -p /opt/spoonfull
 sudo cp -r build/linux/arm64/release/bundle/* /opt/spoonfull/
-sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
+python3 deploy/spoonfull.py     # 1 安裝 / 更新機台 (App 已經在 /opt/spoonfull,不會問要不要下載)
 ```
 
 > 不要帶 `--dart-define=USE_MOCK_API=true` 到正式機台。
@@ -76,7 +86,7 @@ sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
 | 沒有相機 (開發) | 來源 **選擇圖片** | 沒有深度圖 |
 | USB HID 秤 (Dymo / Stamps.com 類) | 類型 **USB HID 秤**,裝置 `/dev/hidraw0` | `ls -l /dev/hidraw*`;udev 規則已開放 plugdev 群組 |
 | 序列埠秤或 HX711 + Arduino/ESP32 | 類型 **序列埠 / HX711 (USB)**,裝置 `/dev/ttyUSB0`、鮑率 | 微控制器每行輸出 `ST,GS,  123.4 g` 或純數字即可 |
-| HX711 直接接 GPIO | 類型 **HX711 (GPIO bridge)**,`127.0.0.1:9100` | 跑 `hx711_bridge.py`,先 `--calibrate <已知重量>` |
+| HX711 直接接 GPIO | 類型 **HX711 (GPIO bridge)**,`127.0.0.1:9100` | 安裝時 HX711 那題選 `y` 裝開機服務;選單 **HX711 秤 → 校正** 放已知重量的砝碼。接線預設 DT → GPIO 5、SCK → GPIO 6 (BCM),可在選單改;GPIO 函式庫見 `spoonfull.py` 開頭說明 |
 | 沒有秤 | 類型 **不使用秤** | 不送 `weight_g`,server 以菜單標準份量估算 |
 
 相機固定架在餐車上、餐盒放固定位置 (秤面就是放餐盒的位置),餐前餐後角度要一致。D435f 的深度在 **30 cm 以內不可靠**,相機到餐盒建議 40–60 cm;「測試拍照」會顯示深度有效比例與中央距離,拿來確認架設高度。
@@ -90,12 +100,78 @@ sudo ./deploy/install-device.sh --user <登入帳號> --skip-download
    - **中央距離**就是相機到餐盒的距離,建議 40–60 cm。
 3. 數字正常後拍 **空秤參考照**(下一節),再 **儲存**。
 
-不想開 App 也可以在終端機測:
+不想開 App 也可以用選單 **相機 → 偵測相機 / 拍一張測試照**:測試照存在 `/tmp/spoonfull_test.jpg`,並印出深度有效比例與中央距離。
 
-```bash
-python3 /opt/spoonfull/realsense_bridge.py --probe                                  # 偵測相機
-python3 /opt/spoonfull/realsense_bridge.py --once /tmp/a.jpg /tmp/a_depth.png /tmp/a.json   # 拍一張,看 /tmp/a.jpg
-```
+### 相機校正 (選單「相機 → 相機校正」)
+
+低頻率的維護操作,透過 SSH 手動執行,App 不會呼叫。新機台第一次、相機被撞到或拆裝過、量測明顯不準時再做;平常可以只跑 health check 看要不要校正。
+
+**要列印的圖檔**
+
+| 用途 | 圖檔 | 取得方式 | 印好後要實測 |
+|---|---|---|---|
+| 深度校正 (On-Chip / Focal Length / Tare 共用) | Intel 官方標靶 `Calibration_Target_v1.pdf`:低對比紋理背景 + 四個模糊圓點 | 下載 <https://librealsense.intel.com/Releases/UCAL/Calibration_Target_v1.pdf> | 圓點中心間距 (設計值 175 mm × 100 mm) |
+| RGB 內參 | ChArUco 板:7×5 格、方格 30 mm、標記 22 mm、字典 `DICT_5X5_100`,A4 橫向 | 工具選項 **8** 產生,預設存到 `~/spoonfull_charuco_7x5_30mm.pdf` | 方格邊長、標記邊長 |
+
+列印方式 (兩張都一樣,依官方白皮書附錄 A):
+
+- **100% 縮放 (實際大小),不可選「符合頁面」**;
+- 霧面 (低反光) 紙,厚一點較好;
+- 貼在平整的硬板上,不能翹曲;
+- 印好後用尺量上表「印好後要實測」的尺寸,校正時要輸入。
+
+官方白皮書「Self-Calibration for D400 Series」:<https://intelrealsense.com/download/9277> (網頁版 <https://dev.intelrealsense.com/docs/self-calibration-for-depth-cameras>)。
+
+**執行**
+
+`python3 /opt/spoonfull/spoonfull.py` → **6 相機 → 3 相機校正**。App 開著時會先問要不要關掉 (相機一次只能給一個程式用),校正結束會問要不要開回來。
+
+相依:`python3-numpy`、`python3-opencv` (「安裝 / 更新機台」已裝) 與 pyrealsense2 (「編譯 / 安裝相機驅動」已裝)。
+
+**相機校正選單**
+
+| 選項 | 做什麼 | 需要 | 會寫入相機嗎 |
+|---|---|---|---|
+| 1 | 完整校正流程 (引導模式):Health check → On-Chip → Focal Length → Tare → RGB 內參 → UV map → Health check,每步可略過,最後列摘要 | 兩張標靶 | 每一步問過才寫 |
+| 2 | 相機資訊:型號、序號、韌體、USB、Advanced Mode | — | 否 |
+| 3 | 目前內參:深度 (左紅外線) 與 RGB 的 fx / fy / ppx / ppy、畸變,深度→RGB 外參;有 RGB 校正檔也一併顯示 | — | 否 |
+| 4 | Health check:\|值\| < 0.25 良好;0.25～1 建議重新校正;> 1 必須重新校正 | 深度標靶或有紋理的平面 | 否 |
+| 5 | On-Chip 自我校正 (預設內參模式,可選外參模式),改善深度雜訊 | 深度標靶或有紋理的平面,紋理占畫面 ≥ 35% | 問過才寫 |
+| 6 | Focal Length 校正:輸入實測圓點中心間距 | 深度標靶,四個圓點都入鏡,距離 0.8～1 m | 問過才寫 |
+| 7 | Tare 校正:輸入相機到標靶平面的真實距離 (mm),校正絕對深度 | 深度標靶,距離約 0.65～1.8 m | 問過才寫 |
+| 8 | 產生 ChArUco 板 PDF | — | 否 |
+| 9 | RGB 內參校正 (OpenCV + ChArUco),見下方 | ChArUco 板 | 否,存檔 |
+| 10 | 深度對齊 RGB 校正 (UV map) — **尚未實作** (官方沒有 Python 用法,需要時用 `realsense-viewer`) | — | — |
+| 11 | 備份目前的校正表到檔案 | — | 否 |
+| 12 | 恢復出廠校正 (會再確認一次,執行前自動備份) | — | 是 |
+| 13 | 顯示標靶下載連結與列印方式 | — | 否 |
+
+**深度校正 (選項 4～7) 的流程**
+
+1. 選項開始前會列出準備事項 (標靶、距離),標靶要平貼並正對相機,按 Enter 開始;**校正中相機與標靶都不能動**。
+2. 第一次執行若相機沒開 Advanced Mode,會詢問是否開啟;開啟後相機會重新啟動,等約 10 秒再選一次。
+3. 工具會先做一次 health check → 執行校正 → 暫時套用新校正再做一次 health check,然後**並排顯示校正前後的內參與 health**。
+4. 詢問「是否寫入相機?(y/N)」,預設不寫入並還原為原本的校正。校正後 health 比校正前差時會提示不要寫入。
+5. 選 y 才寫入;寫入前自動把原本的校正表備份到 `~/.config/spoonfull/realsense_backup/calib_<日期時間>_<序號>.json`。
+
+建議順序 (官方):On-Chip → Focal Length → Tare,最後再跑一次 health check 確認數值變小。
+
+**RGB 內參校正 (選項 9)**
+
+SDK 對 D400 回報的 RGB 畸變係數全為 0,所以另外用 OpenCV 校正,結果只存檔供軟體使用,**不寫入相機**。
+
+1. 輸入實測的方格邊長與標記邊長 (mm)。
+2. 開始預覽 (RGB 1280×720)。透過 SSH 執行時會問要不要把預覽視窗顯示在機台螢幕上;開不了視窗就改用文字模式,終端機會持續顯示偵測到的角點數。
+3. 手持板子,每張變換角度 (傾斜 20～40 度)、距離 (25～40 cm),讓板子輪流出現在畫面四角與邊緣;拿穩後按 **空白鍵** 拍一張,目標 20 張 (最少 10 張),**q** 提早結束。每拍一張會提示還沒拍到的區域。
+4. 計算後比較同一批照片的重投影誤差 (px):A) SDK 出廠內參 (畸變 0) vs B) OpenCV 校正結果,分整體 / 畫面中央 / 邊緣列出,並給建議 (例如 B 明顯較低時建議採用)。
+5. 你決定是否儲存到 `~/.config/spoonfull/rgb_intrinsics.json` (內容:相機序號、解析度、日期、相機矩陣、畸變係數、兩組重投影誤差)。已有舊檔時會先複製一份到 `realsense_backup/`。
+
+**還原**
+
+- 深度校正寫壞了:選項 **12** 恢復出廠校正,再重新校正。每次寫入前的原始校正表都在 `~/.config/spoonfull/realsense_backup/`。
+- RGB 校正不想用了:刪掉 `~/.config/spoonfull/rgb_intrinsics.json` 即回到 SDK 出廠內參。
+
+**測試** (不需要相機):`python3 -m unittest discover -s deploy/tests -v`
 
 ### 空秤參考照
 
@@ -117,17 +193,18 @@ python3 /opt/spoonfull/realsense_bridge.py --once /tmp/a.jpg /tmp/a_depth.png /t
 每次 push 到 `main`,GitHub Actions 會編譯三個平台並更新同一個 Release (`latest`),同時放一份 `version.json`。已安裝的 App 會在**啟動時、網路恢復時、以及每 10 分鐘**讀一次 `version.json`,發現較新的版本就下載、驗證 SHA-256、替換安裝資料夾裡的檔案,然後重新啟動 ([lib/services/update_service.dart](../lib/services/update_service.dart))。
 
 - **不會打斷操作**:拍照或上傳中不安裝;使用者 60 秒內碰過螢幕也先不安裝。剛啟動時視為閒置,會馬上更新。安裝前畫面會顯示「正在更新到最新版本」約 3 秒。
-- **只有 GitHub 編譯的版本會自動更新**。本機 `flutter build` / `flutter run` 的版本編號是 0,不會更新自己。`install-device.sh` 預設就會下載 Release 版本。
+- **只有 GitHub 編譯的版本會自動更新**。本機 `flutter build` / `flutter run` 的版本編號是 0,不會更新自己。「安裝 / 更新機台」預設就會下載 Release 版本。
 - **壞版本會自動退回**:安裝時被換掉的舊檔會改名成 `*.spoonfull-old` 留著,新版順利跑滿 60 秒才刪掉。
   - 安裝到一半失敗:當場換回舊檔,App 繼續使用。
   - 安裝到一半斷電:下次開機換回舊檔。
   - 新版一啟動就當掉(或啟動失敗):kiosk 服務每次啟動前執行 `spoonfull-recover.sh`,連續 3 次沒撐過 60 秒,第 4 次啟動就換回上一版,並把這個版本記在 `/opt/spoonfull/.update-bad-build`,之後不再安裝它。修正後推出更新的版本會照常安裝。
-  - 這需要 kiosk 服務裡的 `ExecStartPre=...spoonfull-recover.sh`;舊機台重跑一次 `install-device.sh` 即可。
+  - 這需要 kiosk 服務裡的 `ExecStartPre=...spoonfull-recover.sh`;舊機台重跑一次「安裝 / 更新機台」即可。
+  - 想在 App 還沒退回前手動換回:選單 **8 還原上一版 App** (只有更新中斷或新版還沒確認正常時才有舊版可換)。
 - **目前跑哪一版**:設定 → 系統狀態的「版本」(build 號碼 = GitHub Actions 的 run number)。
-- **安裝資料夾要可寫入**:機台由 `install-device.sh` 把 `/opt/spoonfull` 的擁有者改成執行 App 的帳號。Windows / Ubuntu 桌機請解壓縮到使用者自己的資料夾 (不要放 `C:\Program Files`)。
+- **安裝資料夾要可寫入**:機台由「安裝 / 更新機台」把 `/opt/spoonfull` 的擁有者改成執行 App 的帳號。Windows / Ubuntu 桌機請解壓縮到使用者自己的資料夾 (不要放 `C:\Program Files`)。
 - **機台要連得到 `github.com`**。醫院網路若有防火牆,需要放行 `github.com` 與 `objects.githubusercontent.com`,否則只是不會更新,App 照常運作。
 - **repo 必須是 public**,App 才讀得到 Release。
-- 看 log:`journalctl -u spoonfull-kiosk | grep -i update`,或 App 自己的紀錄檔 `~/.local/share/com.example.spoonfull_flutter_app/logs/spoonfull.log` (見 §6)。`auto-update off: ... is not writable` 表示安裝資料夾權限不對,重跑一次 `install-device.sh`。
+- 看 log:選單 **5 查看 App 狀態與 log**,或 App 自己的紀錄檔 `~/.local/share/com.example.spoonfull_flutter_app/logs/spoonfull.log` (見 §6)。`auto-update off: ... is not writable` 表示安裝資料夾權限不對,重跑一次「安裝 / 更新機台」。
 - 更新來源可在編譯時用 `--dart-define=UPDATE_BASE_URL=https://.../` 改成自己的伺服器 (底下要有 `version.json` 與安裝檔)。
 
 ## 6. 常見問題
@@ -137,8 +214,8 @@ python3 /opt/spoonfull/realsense_bridge.py --once /tmp/a.jpg /tmp/a_depth.png /t
 - **照片佔用空間**:已上傳的照片 14 天後自動刪除,紀錄 90 天後刪除;還沒上傳的不會動。調整在 `lib/config/app_constants.dart` 的 `synced*Retention`。
 
 - **App 啟動後配對狀態每次都消失**:kiosk 沒有 keyring,App 會自動改用 `~/.local/share/.../auth_token.json` (權限 600)。看 log 有 `using file storage` 即正常。
-- **「找不到 RealSense 相機」**:`rs-enumerate-devices` 沒列出 → 換 USB 3 線 / 埠、確認電源夠 (5 A);有列出但 App 找不到 → 重新登入讓 plugdev 群組生效,或 `sudo udevadm trigger`。
-- **「這台機器的相機還沒設定好」**:`python3 -c "import pyrealsense2"` 失敗 → 跑 `deploy/build-librealsense.sh`;或 bridge 檔案不在 (看 log `realsense bridge not found`)。
+- **「找不到 RealSense 相機」**:`rs-enumerate-devices` 沒列出 → 換 USB 3 線 / 埠、確認電源夠 (5 A);有列出但 App 找不到 → 重新登入讓 plugdev 群組生效,或重跑一次「安裝 / 更新機台」(會重新載入 udev 規則)。
+- **「這台機器的相機還沒設定好」**:選單「相機 → 偵測相機」說找不到 pyrealsense2 → 跑「相機 → 編譯 / 安裝相機驅動」;或 bridge 檔案不在 (看 log `realsense bridge not found`) → 重跑「安裝 / 更新機台」。
 - **「相機沒有回應」**:bridge 超過 20 秒沒回。多半是 USB 2 連線 (「偵測相機」會顯示 USB 2.x) 或相機被另一個程序佔著 (`realsense-viewer` 還開著)。
 - **深度有效比例很低 / 中央距離 0**:相機太近 (< 30 cm) 或對著反光面;拉開到 40–60 cm。
 - **相機第一張很暗**:自動曝光還沒收斂。預設丟掉 15 張暖機影格再取;若仍暗,補光燈常亮,或在 `CameraSettings.warmupFrames` 調大。

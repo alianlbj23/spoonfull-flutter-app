@@ -87,4 +87,4 @@ cpack -G DEB 2>/dev/null && ls -1 "$SRC_DIR"/build/*.deb || echo "   cpack 失�
 
 echo
 echo "完成。接上 D435f (USB 3 埠) 後:rs-enumerate-devices 應列出相機。"
-echo "再執行 sudo ./deploy/install-device.sh 安裝 App 與 realsense_bridge.py。"
+echo "再執行 python3 deploy/spoonfull.py,選「安裝 / 更新機台」安裝 App 與 realsense_bridge.py。"

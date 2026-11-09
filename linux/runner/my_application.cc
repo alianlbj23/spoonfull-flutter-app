@@ -19,7 +19,7 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
 // Kiosk mode for the meal cart (Jetson Orin Nano / Raspberry Pi 5):
 // fullscreen, no title bar, hidden cursor on the touch screen.
-// Enabled with SPOONFULL_KIOSK=1 (set by deploy/spoonfull-kiosk.service).
+// Enabled with SPOONFULL_KIOSK=1 (set by the spoonfull-kiosk service that deploy/spoonfull.py installs).
 static gboolean kiosk_enabled() {
   const char* v = std::getenv("SPOONFULL_KIOSK");
   return v != nullptr && std::strcmp(v, "0") != 0 && std::strcmp(v, "") != 0;

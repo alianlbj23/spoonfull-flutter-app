@@ -165,7 +165,7 @@ class HidScaleReader extends ScaleReader {
   };
 }
 
-/// 文字行協定:序列埠秤、HX711 + 微控制器 (USB 序列埠),或 deploy/hx711_bridge.py 的 TCP 輸出。
+/// 文字行協定:序列埠秤、HX711 + 微控制器 (USB 序列埠),或 deploy/spoonfull.py hx711-bridge 的 TCP 輸出。
 ///
 /// 每行一個數值,例如 `ST,GS,  123.4 g`、`0.1234 kg`、`123.4`、`US,GS, 120.1 g`。
 /// `ST` 視為穩定、`US` 視為不穩定;沒有單位時當公克。

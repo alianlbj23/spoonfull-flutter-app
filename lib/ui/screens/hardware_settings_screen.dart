@@ -417,7 +417,7 @@ class _HardwareSettingsScreenState extends State<HardwareSettingsScreen> {
                             ),
                           ],
                           if (sc.kind == ScaleKind.tcp) ...[
-                            _Label('bridge 位址與埠 (deploy/hx711_bridge.py)'),
+                            _Label('bridge 位址與埠 (deploy/spoonfull.py 的 HX711 服務)'),
                             Row(
                               children: [
                                 PillField(
