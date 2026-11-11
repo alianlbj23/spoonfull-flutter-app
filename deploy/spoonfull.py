@@ -680,7 +680,8 @@ def _bridge_path() -> Path:
 
 def _release_camera(runner: Runner, input_fn: Callable[[str], str]) -> bool:
     """App 開著會占用相機;問要不要先關。回傳是否有關掉 (結束後要不要開回來)。"""
-    if service_state(runner, KIOSK)[0] != "active":
+    # activating:App 當掉後 systemd 正在自動重啟 (Restart=always),幾秒後就會搶相機,也要關
+    if service_state(runner, KIOSK)[0] not in ("active", "activating", "reloading"):
         return False
     if ask_yes_no("App 正在執行,會占用相機。要先關閉 App 嗎?", default=True, input_fn=input_fn):
         stop_app(runner)
@@ -732,8 +733,15 @@ def camera_calibration(runner: Runner, input_fn: Callable[[str], str] = input) -
 
         realsense_tool.main_menu(input_fn)
     finally:
-        if reopen and ask_yes_no("校正結束,要把 App 開回來嗎?", default=True, input_fn=input_fn):
-            start_app(runner)
+        if reopen:
+            try:
+                again = ask_yes_no("校正結束,要把 App 開回來嗎?", default=True, input_fn=input_fn)
+            except (EOFError, KeyboardInterrupt, OSError):
+                again = True  # SSH 斷線或中斷:機台不能沒人知道地停著,直接開回來
+            if again:
+                start_app(runner)
+            else:
+                print("App 維持關閉;要開時請用主選單「開啟 App」。")
     return "已離開相機校正"
 
 
@@ -956,5 +964,30 @@ def main(argv: list[str] | None = None, euid: int | None = None) -> int:
     return main_menu(runner)
 
 
+def install_exit_signals() -> None:
+    """SSH 斷線 (SIGHUP) / kill (SIGTERM) 改成丟 KeyboardInterrupt,讓 finally 把 App 開回來、還原相機設定。
+
+    預設行為是直接結束,finally 都不會跑:例如相機校正途中斷線,App 會一直停著。
+    斷線後終端機已不在,先把標準輸入輸出接到 /dev/null (input 得到 EOF,選單會當成離開)。
+    """
+    import signal
+
+    def handler(signum, _frame):
+        if signum == getattr(signal, "SIGHUP", None):
+            try:
+                fd = os.open(os.devnull, os.O_RDWR)
+                for target in (0, 1, 2):
+                    os.dup2(fd, target)
+            except OSError:
+                pass
+        raise KeyboardInterrupt
+
+    for name in ("SIGHUP", "SIGTERM"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), handler)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] != ["hx711-bridge"]:  # 背景服務維持預設的信號行為
+        install_exit_signals()
     sys.exit(main())

@@ -354,6 +354,34 @@ class RestoreTest(unittest.TestCase):
         self.assertEqual(runner.commands, [])
 
 
+class CameraCalibrationTest(unittest.TestCase):
+    def _run(self, state, tool_side_effect, input_fn):
+        runner = FakeRunner(outputs={f"systemctl is-active {sf.KIOSK}.service": state,
+                                     f"systemctl is-enabled {sf.KIOSK}.service": "enabled"})
+        fake_tool = mock.Mock()
+        fake_tool.main_menu.side_effect = tool_side_effect
+        with mock.patch.dict(sys.modules, {"realsense_tool": fake_tool}), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            try:
+                sf.camera_calibration(runner, input_fn)
+            except KeyboardInterrupt:
+                pass
+        return runner.joined()
+
+    def test_app_restarting_is_also_stopped(self):
+        cmds = self._run("activating", None, answers("", ""))
+        self.assertIn(f"systemctl stop {sf.KIOSK}.service", cmds)
+        self.assertIn(f"systemctl start {sf.KIOSK}.service", cmds)
+
+    def test_hangup_during_calibration_still_reopens_app(self):
+        def eof(_prompt=""):
+            raise EOFError
+
+        it = iter([""])  # 只回答「要先關閉 App 嗎」,之後 SSH 斷線 → EOF
+        cmds = self._run("active", KeyboardInterrupt, lambda p="": next(it) if "關閉" in p else eof())
+        self.assertIn(f"systemctl start {sf.KIOSK}.service", cmds)
+
+
 class MenuTest(unittest.TestCase):
     def test_zero_exits(self):
         with mock.patch("sys.stdout", new=io.StringIO()):
