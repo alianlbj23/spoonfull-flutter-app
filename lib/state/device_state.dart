@@ -12,7 +12,7 @@ import '../services/app_services.dart';
 /// 配對狀態機 (規格 5.1)。
 enum PairingStatus { initializing, notPaired, pairing, paired }
 
-/// 配對流程 (Device Authorization Flow,README §4.1) 的時序控制:
+/// 配對流程 (Device Authorization Flow,docs/API.md §4.1) 的時序控制:
 /// 取碼 → 每 `interval` 秒輪詢 → 核准 / 過期換碼 / 被拒停止。
 ///
 /// `device_code` 只放在這個物件的記憶體裡 ([_deviceCode]),配對完成、過期、

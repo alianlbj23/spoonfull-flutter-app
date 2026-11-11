@@ -4,7 +4,7 @@ class AppConstants {
 
   // --- API endpoints (ARCHITECTURE.md §6.1) ---
   // 路徑結尾一律有斜線,避免 Django APPEND_SLASH 轉址丟掉 POST body。
-  /// 配對 (Device Authorization Flow,README §4.1):機台取碼 → 管理員在網頁核准 → 機台輪詢。
+  /// 配對 (Device Authorization Flow,docs/API.md §4.1):機台取碼 → 管理員在網頁核准 → 機台輪詢。
   static const String pairStartPath = 'api/machine/pair/start/';
   static const String pairPollPath = 'api/machine/pair/poll/';
 

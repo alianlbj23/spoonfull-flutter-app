@@ -565,7 +565,7 @@ def install_device(runner: Runner, input_fn: Callable[[str], str] = input, curre
     if download:
         download_app(runner)
     if not app_installed() and not download:
-        print(f"   注意:{INSTALL_DIR} 裡還沒有 App。請把 bundle/* 複製進去 (見 deploy/README.md §2)。")
+        print(f"   注意:{INSTALL_DIR} 裡還沒有 App。請把 bundle/* 複製進去 (見 docs/DEPLOY_NOTES.md §2)。")
     for name in SUPPORT_FILES:
         src, dest = HERE / name, INSTALL_DIR / name
         if src.resolve() == dest.resolve():

@@ -71,15 +71,15 @@
 | 功能 | 狀態 | 說明 |
 |---|---|---|
 | 選病房 → 床位 → 菜色 → 餐前／餐後 → 拍照 → 上傳 | 已有 | |
-| 離線佇列、重試（1s → 5s → 30s → 5m，之後每 30m 直到成功） | 已有 | 以錯誤信封的 `retryable` 為準；舊版 server 沒給時只有 4xx 錯誤信封（408 / 429 除外）不重試，代理回的 HTML 一律重試；遵守 `Retry-After`，見 §6.3 與 README §3.3 |
-| 配對、token 儲存 | 已有 | Device Authorization Flow：機台顯示配對碼，管理員在網頁核准，機台輪詢拿 token（README §4.1）。Linux kiosk 沒有 keyring 時自動改用檔案儲存（權限 600） |
+| 離線佇列、重試（1s → 5s → 30s → 5m，之後每 30m 直到成功） | 已有 | 以錯誤信封的 `retryable` 為準；舊版 server 沒給時只有 4xx 錯誤信封（408 / 429 除外）不重試，代理回的 HTML 一律重試；遵守 `Retry-After`，見 §6.3 與 docs/API.md §3.3 |
+| 配對、token 儲存 | 已有 | Device Authorization Flow：機台顯示配對碼，管理員在網頁核准，機台輪詢拿 token（docs/API.md §4.1）。Linux kiosk 沒有 keyring 時自動改用檔案儲存（權限 600） |
 | 相機擷取 (RGB-D) | 已有 | Intel RealSense D435f：`deploy/realsense_bridge.py`（pyrealsense2）輸出 RGB JPEG + 對齊深度 16-bit PNG（mm）+ meta（內參、序號），上傳欄位 `depth` / `depth_meta`。拍照畫面先顯示相機即時畫面（bridge `--preview` 串流），按快門才拍。開發用「選擇圖片」（無深度） |
 | 秤重 | 已有 | 自動讀取秤的數值（USB HID 秤、序列埠秤或 HX711 load cell），餐前餐後各一次，隨照片上傳 |
 | 拍照品質檢查 | 已有 | 純 CPU：過暗、過亮、模糊（Laplacian 變異數）、餐盒不在畫面 → 提示重拍 |
 | 壓縮 | 已有 | 長邊 1280、JPEG 品質 80 |
 | 上傳欄位 | 已有 | `weight_g`、`client_record_id`（見 §6.4） |
 | 推播 | 已有 | `api/machine/ws/` 收到 `data_changed` 立刻重抓，見 §6.6 |
-| 自動更新 | 已有 | 每次 push 到 `main` 由 CI 發佈；新版啟動失敗時自動退回上一版（`deploy/README.md` §5） |
+| 自動更新 | 已有 | 每次 push 到 `main` 由 CI 發佈；新版啟動失敗時自動退回上一版（`docs/DEPLOY_NOTES.md` §4） |
 
 ### 5.2 硬體
 
@@ -103,14 +103,14 @@
 | 端點 | 對應 server 資料 |
 |---|---|
 | `POST api/machine/pair/start/` | 機台送 `hardware_id`（App 的 UUID）與 `app_version`，server 發 `device_code`（機台輪詢用）與 `pairing_code`（顯示給管理員，10 分鐘內有效、一次性）。同一 `hardware_id` 再配對視為同一台機台，舊 token 失效 |
-| `POST api/machine/pair/poll/` | 機台每 `interval` 秒問一次；管理員在網頁「機台管理」輸入配對碼核准後回 `approved` + 專屬 token（存雜湊值）、整數 `device_id`、`device_name`。`EXPIRED` / `DENIED` / `SLOW_DOWN` 的機台行為見 README §4.1 |
+| `POST api/machine/pair/poll/` | 機台每 `interval` 秒問一次；管理員在網頁「機台管理」輸入配對碼核准後回 `approved` + 專屬 token（存雜湊值）、整數 `device_id`、`device_name`。`EXPIRED` / `DENIED` / `SLOW_DOWN` 的機台行為見 docs/API.md §4.1 |
 | `GET api/machine/me/` | 已配對機台的 `device_id` / `device_name` / `location`；機台啟動時用來確認 token 仍有效 |
 | `GET api/machine/rooms/` | `LTCPatient.room_number` 去重 |
 | `GET api/machine/beds/` | `LTCPatient`：`bed_id = "{room}-{bed}"`，`patient_id = LTCPatient.id`。選填 `?room_id=` 只回該房 |
 | `GET api/machine/meals/` | **當天**的菜色：循環模式依 `day_cycle`，開放模式依 `serve_date`。時段來自 `SystemSettings.lunch_*/dinner_*` |
 | `POST api/machine/records/` | 建立 `FoodIntake`，見 §6.4 |
-| `GET api/machine/health/` | 健康檢查（不需認證）：`status`、`server_time`、`api_version`；機台用來測試連線與檢查時鐘誤差（README §4.0） |
-| `WS api/machine/ws/` | 推播：`LTCPatient` / `SystemSettings` / `Meal` 一變動，server 送 `data_changed`，機台立刻重抓（README §4.7；server 端 `devices/consumers.py`、`devices/events.py`） |
+| `GET api/machine/health/` | 健康檢查（不需認證）：`status`、`server_time`、`api_version`；機台用來測試連線與檢查時鐘誤差（docs/API.md §4.0） |
+| `WS api/machine/ws/` | 推播：`LTCPatient` / `SystemSettings` / `Meal` 一變動，server 送 `data_changed`，機台立刻重抓（docs/API.md §4.7；server 端 `devices/consumers.py`、`devices/events.py`） |
 
 所有回應用 `{ "success": true, "data": {...} }` / `{ "success": false, "error": { "code", "message" } }`。`error.message` 會直接顯示在機台螢幕，用中文。
 
