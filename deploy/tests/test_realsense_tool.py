@@ -24,6 +24,11 @@ import numpy as np  # noqa: E402
 import realsense_tool as rt  # noqa: E402
 
 
+def answers_from(seq):
+    it = iter(seq)
+    return lambda _prompt="": next(it)
+
+
 class FakeAutoCalibDevice:
     """記錄呼叫順序的假 auto_calibrated_device。"""
 
@@ -77,6 +82,36 @@ class InputTest(unittest.TestCase):
         for bad in ["", "abc", "0", "-5", "1e9", "nan", "inf"]:
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 rt.parse_mm(bad, 1, 2000)
+
+    def test_ask_mm_warns_when_letter_target_was_shrunk_onto_a4(self):
+        # 官方標靶是 US Letter;A4 印表機「縮小超出的頁面」會縮成 210/215.9 = 97.3%,175 mm → 170.2 mm
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            value = rt.ask_mm("左右圓點中心間距", 100, 250, 175.0, input_fn=answers_from(["170.2", "y"]))
+        self.assertEqual(value, 170.2)
+        self.assertIn("100%", out.getvalue())
+
+    def test_ask_mm_accepts_normal_printer_variation_silently(self):
+        # 白皮書:不同印表機最多約 0.5% 誤差,不該跳警告
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            value = rt.ask_mm("左右圓點中心間距", 100, 250, 175.0, input_fn=answers_from(["175.8"]))
+        self.assertEqual(value, 175.8)
+        self.assertNotIn("注意", out.getvalue())
+
+    def test_ask_mm_ignores_ruler_resolution_on_small_sizes(self):
+        # 直尺刻度 0.5 mm:方格 30 mm 量成 30.5 mm (1.7%) 是正常讀數誤差,不該警告
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            value = rt.ask_mm("實測方格邊長", 5, 100, 30.0, input_fn=answers_from(["30.5"]))
+        self.assertEqual(value, 30.5)
+        self.assertNotIn("注意", out.getvalue())
+
+    def test_ask_mm_still_warns_when_small_board_was_scaled(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            rt.ask_mm("實測方格邊長", 5, 100, 30.0, input_fn=answers_from(["28.2", "y"]))  # 「符合頁面」約 94%
+        self.assertIn("注意", out.getvalue())
 
     def test_ask_yes_no_defaults_to_no(self):
         self.assertFalse(rt.ask_yes_no("寫入?", input_fn=lambda _: ""))
@@ -504,8 +539,37 @@ class ErrorPathTest(unittest.TestCase):
                 rt.import_cv2()
         self.assertIn("OpenCV", str(cm.exception))
 
+    def test_materials_are_listed_before_the_menu(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            rt.main_menu(input_fn=answers_from(["", "0"]))
+        text = out.getvalue()
+        self.assertLess(text.index("所需材料"), text.index("Spoonfull RealSense 相機維護工具"))
+        for must in (rt.TARGET_PDF_URL, "ChArUco", "100%", "硬板", "尺", "捲尺", "US Letter", "A4"):
+            self.assertIn(must, text)
+
+    def test_quitting_at_materials_skips_the_menu(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            self.assertEqual(rt.main_menu(input_fn=answers_from(["q"])), 0)
+        self.assertNotIn("Spoonfull RealSense 相機維護工具", out.getvalue())
+
+    def test_p_generates_the_charuco_pdf_first(self):
+        with mock.patch.object(rt, "run_generate_charuco_pdf", return_value="ok") as gen, \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            rt.main_menu(input_fn=answers_from(["p", "0"]))
+        gen.assert_called_once()
+
+    def test_option_13_also_lists_materials(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            rt.show_targets()
+        self.assertIn("所需材料", out.getvalue())
+        self.assertIn("捲尺", out.getvalue())
+
     def test_menu_exits_on_zero_and_survives_tool_errors(self):
-        answers = iter(["2", "", "99", "0"])  # 每個項目結束後按 Enter 回主選單
+        # 第一個 Enter:看完材料清單;每個項目結束後按 Enter 回主選單
+        answers = iter(["", "2", "", "99", "0"])
         out = io.StringIO()
 
         def boom():

@@ -59,6 +59,14 @@ DEPTH_SIZE = (848, 480)
 
 # 官方標靶設計值:圓點中心間距 175 mm x 100 mm (官方範例 --target-width / --target-height 預設值)
 TARGET_DESIGN_MM = (175.0, 100.0)
+# 官方標靶 PDF 實測為 US Letter 橫向 (MediaBox 792x612 pt = 279.4x215.9 mm),不是 A4。
+# A4 (210 mm 高) 選「實際大小」:上下各裁掉約 3 mm 背景,圓點離紙邊 ≥ 37 mm 不受影響;
+# 印表機若「縮小超出的頁面」會縮成 210/215.9 ≈ 97.3%。
+TARGET_PAPER = "US Letter 橫向 (279.4 x 215.9 mm)"
+# 實測值與設計值差超過這個比例就請使用者確認。白皮書:不同印表機約有 0.5% 誤差;
+# Letter 縮到 A4 是 -2.7%,門檻要比它小才抓得到。
+PRINT_SCALE_WARN = 0.015
+RULER_RESOLUTION_MM = 0.5  # 直尺刻度;差距在這以內不警告 (方格 30 mm 量成 30.5 mm 是正常讀數誤差)
 
 # ChArUco 板 (由選項 8 產生)
 CHARUCO_SQUARES = (7, 5)  # (橫向格數, 縱向格數)
@@ -170,9 +178,11 @@ def ask_mm(prompt: str, lo: float, hi: float, design: float | None = None,
         except ValueError as e:
             print(e)
             continue
-        if design and abs(value - design) / design > 0.03:
+        if design and abs(value - design) > max(design * PRINT_SCALE_WARN, RULER_RESOLUTION_MM):
             pct = (value - design) / design * 100
-            print(f"注意:與設計值 {design:g} mm 相差 {pct:+.1f}%,請確認列印時是 100% 縮放、沒有「符合頁面」。")
+            print(f"注意:與設計值 {design:g} mm 相差 {pct:+.1f}%,請確認列印時是 100% 縮放 (實際大小)、"
+                  "沒有「符合頁面」或「縮小超出的頁面」(官方標靶用 A4 紙印,被縮小時約 -2.7%)。")
+            print("如果數值是用尺仔細量的,照實輸入即可,校正會以實測值為準。")
             if not ask_yes_no("確定使用這個數值嗎?(y/N)", input_fn=input_fn):
                 continue
         return value
@@ -1278,21 +1288,48 @@ def run_factory_reset(input_fn: Callable[[str], str] = input) -> str:
     return "已恢復出廠校正"
 
 
+# 進入選單時先列出來,讓使用者一次把要印的、要準備的東西備齊
+MATERIALS: list[tuple[str, list[str]]] = [
+    ("要列印的 (一次印好)", [
+        f"深度校正標靶 Calibration_Target_v1.pdf (官方):{TARGET_PDF_URL}",
+        "    用於 Health check / On-Chip / Focal Length / Tare",
+        f"    PDF 是 {TARGET_PAPER},不是 A4。用 A4 紙印也可以:選「實際大小」,",
+        "    上下各裁掉約 3 mm 背景,四個圓點不受影響;但不能讓印表機「縮小超出的頁面」(會縮成約 97%)",
+        f"ChArUco 板 (A4 橫向,{CHARUCO_SQUARES[0]}x{CHARUCO_SQUARES[1]} 格、方格 {CHARUCO_SQUARE_MM:g} mm、"
+        f"標記 {CHARUCO_MARKER_MM:g} mm):本工具產生,下面輸入 p 或選單 8",
+        "    用於 RGB 內參",
+    ]),
+    ("列印方式 (兩張都一樣)", [
+        "100% 縮放 (實際大小),不可選「符合頁面」",
+        "霧面 (低反光) 紙,厚一點較好",
+    ]),
+    ("要準備的工具", [
+        "平整硬板 2 塊 (比標靶大、不會彎) + 膠水或雙面膠:兩張標靶各貼一塊,不能翹曲",
+        f"尺 (mm 刻度,鋼尺較準):量深度標靶的圓點中心間距 (設計值 {TARGET_DESIGN_MM[0]:g} x "
+        f"{TARGET_DESIGN_MM[1]:g} mm)、ChArUco 板的方格與標記邊長 (設計值 {CHARUCO_SQUARE_MM:g} / "
+        f"{CHARUCO_MARKER_MM:g} mm)",
+        "捲尺:Tare 要量相機到標靶平面的真實距離 (約 0.65～1.8 m)",
+        "能把深度標靶立著固定的支架或牆面:Focal Length 放 0.8～1 m、Tare 放 0.65～1.8 m,校正中不能動",
+        "RGB 內參不用支架:手持 ChArUco 板,距離 25～40 cm",
+    ]),
+]
+
+
+def _print_materials() -> None:
+    _title("相機校正所需材料")
+    for heading, items in MATERIALS:
+        print(f"{heading}:")
+        for item in items:
+            print(f"  {item}" if item.startswith("    ") else f"  [ ] {item}")
+
+
 def show_targets(input_fn: Callable[[str], str] = input) -> str:
-    _title("校正標靶下載與列印方式")
-    print("深度校正 (On-Chip / Focal Length / Tare 共用):")
-    print(f"  官方標靶 PDF:{TARGET_PDF_URL}")
-    print("  低對比紋理背景 + 四個模糊圓點;圓點中心設計間距 175 mm x 100 mm。")
+    _print_materials()
+    print("\n參考資料:")
+    print("  深度標靶:低對比紋理背景 + 四個模糊圓點。")
     print(f"  官方白皮書 (附錄 A 有標靶與列印說明):{WHITEPAPER_URL}")
     print(f"  網頁版:{WHITEPAPER_WEB_URL}")
-    print("RGB 內參:ChArUco 板,用選項 8 產生 PDF")
-    print(f"  {CHARUCO_SQUARES[0]}x{CHARUCO_SQUARES[1]} 格、方格 {CHARUCO_SQUARE_MM:g} mm、"
-          f"標記 {CHARUCO_MARKER_MM:g} mm、字典 {CHARUCO_DICT_NAME},A4 橫向。")
-    print("列印方式:")
-    print("  1. 100% 縮放 (實際大小),不可選「符合頁面」。")
-    print("  2. 霧面紙 (低反光),厚一點的紙較好。")
-    print("  3. 貼在平整的硬板上,不能翹曲。")
-    print("  4. 印好後實測:深度標靶量圓點中心間距;ChArUco 板量方格邊長與標記邊長。執行校正時輸入實測值。")
+    print("  印好後實測的數值,在執行對應的校正時輸入。")
     return "已顯示"
 
 
@@ -1360,12 +1397,25 @@ MENU: list[tuple[str, str, str]] = [
     ("10", "深度對齊 RGB 校正 (UV map) - 尚未實作", "run_uv_map"),
     ("11", "備份目前的校正表到檔案", "run_backup"),
     ("12", "恢復出廠校正", "run_factory_reset"),
-    ("13", "顯示校正標靶下載連結與列印方式", "show_targets"),
+    ("13", "顯示所需材料、標靶下載連結與列印方式", "show_targets"),
     ("0", "離開", ""),
 ]
 
 
 def main_menu(input_fn: Callable[[str], str] = input) -> int:
+    _print_materials()
+    try:
+        ans = input_fn("\n準備好後按 Enter 進入選單;輸入 p 先產生 ChArUco 板 PDF;q 離開:").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return 0
+    if ans == "q":
+        return 0
+    if ans == "p":
+        try:
+            run_generate_charuco_pdf(input_fn)
+        except ToolError as e:
+            print(f"\n錯誤:{e}")
     while True:
         _title("Spoonfull RealSense 相機維護工具")
         for key, label, _ in MENU:
